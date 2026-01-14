@@ -1,5 +1,8 @@
-\documentclass[12pt]{article}
-\include{packages}
+\documentclass[10pt]{article}
+\author{Victorien GBAGUIDI}
+\usepackage{epigraph}
+\usepackage{graphicx}
+\input{packages}
 
 \begin{document}
 
@@ -11,7 +14,6 @@
         
         \huge
         \textbf{Comment gérer l’obsolescence de la chaîne CI/CD au sein d’une entreprise ?}
-        \title{Comment gérer l’obsolescence de la chaîne CI/CD au sein d’une entreprise ?}
         
         \vspace{1.5cm}
         
@@ -34,57 +36,51 @@
     \end{center}
 \end{titlepage}
 
-{\let\newpage\relax\vspace{-3em}\maketitle}
-
 % Remove page number in the first page
 \thispagestyle{empty}
 
 % Transition to Roman numerals
 \pagenumbering{roman}
 
-% Abstract
-\input{sections/abstract}
-
-% Quote
-\newpage
-\setlength\epigraphwidth{9cm}
-\setlength\epigraphrule{0pt}
-\epigraph{"That's one small step for man, on giant leap for mankind"}{--- Neil Alden Armstrong}
-
 % Font
 \titleformat*{\section}{\LARGE\bfseries}
 
 \newpage
-\tableofcontents
+%\tableofcontents UNCOMMENT
 \newpage
-\listoffigures
-\listoftables
+%\listoffigures UNCOMMENT
+%\listoftables UNCOMMENT
 \newpage
 
 % Thanks
-\phantomsection
+\phantomsection\relax
 \addcontentsline{toc}{section}{Thanks}
-\include{sections/thanks}
+%\input{sections/thanks}
 \newpage
 
 % Acronyms
-\phantomsection
+\phantomsection\relax
 \addcontentsline{toc}{section}{Acronyms}
-\include{sections/acronyms}
+%\input{sections/acronyms}
 \newpage
 
 % Switch to Arabic numerals
 \pagenumbering{arabic}
 
 % -------- Sections --------
-\include{sections/contexte}
+
+% Introduction
+\input{sections/introduction.tex}
+
+
+%\include{sections/contexte}
 % ADD A NEW FILE IN sections/ %
 % AND
 % PUT NEXT SECTIONS HERE %
-\include{sections/conclusion}
+%\include{sections/conclusion}
 
 % Bibliography
 \addcontentsline{toc}{section}{Bibliography}
-\include{sections/bibliography}
+%\include{sections/bibliography}
 
 \end{document}
