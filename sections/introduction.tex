@@ -4,73 +4,74 @@ déploiement continues (CI/CD) jouent un rôle crucial dans la livraison rapide 
 fiable des logiciels. Cependant, avec l'évolution rapide des technologies et des
 pratiques de développement, ces chaînes CI/CD peuvent rapidement devenir
 obsolètes, posant des défis significatifs pour les entreprises d'un point de vue
-de l'efficacité opérationnelle et de la sécurité des systèmes d'information.
-Nous allons voir dans ce mémoire comment gérer l'obsolescence des chaînes CI/CD
-au sein d'une entreprise en explorant les stratégies adoptées pour maintenir
-leur pertinence et leur efficacité dans un environnement en constante évolution.
-Une solution dans le cadre de la Société Générale CIB sera proposée à travers la
-migration de la chaîne CI/CD vers des solutions plus modernes en passant de
-Jenkins vers Github Actions et en passant de serveurs on-premises vers un
-cluster de serveurs Kubernetes pour un microservice. Dans un premier temps, nous
-présenterons le contexte et les enjeux liés à l'obsolescence des chaînes CI/CD,
-avant d'explorer les différentes approches pour y faire face. Nous allons
-notamment présenter les stratégies de remédiation de l'obsolescence ainsi que
-des outils et technologies émergentes qui peuvent être intégrés dans les chaînes
-CI/CD pour améliorer leur résilience et leur adaptabilité. Enfin, nous
-conclurons en soulignant l'importance de la gestion proactive de l'obsolescence
-des chaînes CI/CD pour assurer la compétitivité et la sécurité des entreprises
-dans le paysage technologique actuel.
+de l'efficacité opérationnelle et de la sécurité des systèmes d'information. Ce
+mémoire traitera la problématique suivante : \textbf{Dans quelle mesure la
+modernisation technologique de la chaîne CI/CD, couplée à une stratégie de
+\textit{knowledge management} permet de transformer l'obsolescence technique en
+levier stratégique ?} 
+
+Ce mémoire propose une stratégie de migration de la chaîne CI/CD vers des
+solutions plus modernes en passant de Jenkins vers GitHub Actions et en faisant
+une transition de serveurs on-premises vers un cluster de serveurs Kubernetes.
+La migration technologique d'un microservice sera présentée dans cette étude. La
+solution comportera également une stratégie d'accompagnement au changement et de
+\textit{knowledge management} pour pérenniser la connaissance au sein de
+l'entreprise et favoriser son adaptabilité.
 
 \subsection*{Contexte}
 % Provide context and background information about the topic
 Le service Alltra est en charge d'une application éponyme de gestion
 documentaire de transactions commerciales de matières premières. L'application
 est composée d'une quarantaine de microservices mais repose sur une
-infrastructure ci/cd vieillissante (Jenkins/XLDeploy). Cela pose des problèmes
-d'automatisation car aujourd'hui, les microservices sont en partie déployés
+infrastructure CI/CD vieillissante (Jenkins/XLDeploy). Cela pose des problèmes
+d'automatisation car, aujourd'hui, les microservices sont en partie déployés
 manuellement allongeant considérablement la mise en production. De plus, du fait
 d'une configuration vieillissante (Jenkinsfile / Groovy) la correction des
 erreurs de build est plus compliquée. Certains plugins Jenkins présentent en
 outre des failles de sécurité (Common Vulnerabilities and Exposures ou CVE) et
 ne sont plus maintenus par la communauté.
 
-Passer à l'usage de Github Actions permettra de rationaliser la chaîne ci/cd.
-Aujourd'hui le doublon Jenkins/Github Actions crée un surcoût injustifié quant
-aux coûts des licences Github et au maintien des serveurs Jenkins tandis que
-Github et Github Actions forment une solution intégrée. De plus, d'un point de vue
+L'usage de GitHub Actions permettra de rationaliser la chaîne CI/CD. Aujourd'hui
+la redondance Jenkins/GitHub Actions crée un surcoût injustifié quant aux coûts
+des licences GitHub et au maintien des serveurs Jenkins tandis que GitHub et
+GitHub Actions forment une solution intégrée. De plus, d'un point de vue
 technique les compétences de l'équipe Alltra sont plus alignées avec l'usage de
-Github Actions, plus aisée (configuration YAML), qu'avec Jenkins (configuration
-Groovy). La configuration YAML, déclarative, est plus aisée à lire et donc à
-maintenir que la configuration Groovy. Enfin la connexion au serveur Jenkins
-depuis le serveur Github crée une complexité injustifiée (à préciser) dans la
-chaîne ci/cd. Le passage à Github Actions supprime ce besoin de connexion et
-regroupe l'hébergement du code et son déploiement. Les plugins sur Github
-Actions sont appelés des actions. La Société Générale dispose de d'actions
-internes sur Github Actions qui offrent des fonctionnalités d'automatisation
-ci/cd. Une gouvernance quant à la gestion du cycle de vie de ces actions sera
-nécessaire et discuté au cours de ce mémoire. La Société Générale peut également
-bénéficier d'un écosystème d'actions officielles venant de comptes certifiés
-(Verified Creators) contrairement aux plugins communautiares de Jenkins qui ne
-sont pas certifiés. Ma stratégie de migration consiste à
-exploiter les actions certifiés de Github Actions pour automatiser la chaîne
-ci/cd et à utiliser les plugins internes de la Société Générale pour ses besoins
-spécifiques.
+GitHub Actions (configuration YAML) qu'avec celui de Jenkins (configuration
+Groovy). La configuration YAML, déclarative, permet de faire abstraction de la
+logique sous-jacente de la configuration des pipelines CI/CD tandis que la
+configuration Groovy, impérative, force la programmation de la logique
+sous-jacente et augmente ainsi le risque d'erreurs et la complexité de la
+configuration. 
 
-Aussi, les serveurs on-premises actuellement supporté seront décommissionnés
-cette année et doivent donc impérativement être remplacés. Je propose de passer
-à un cluster Kubernetes. Ce choix stratégique répond à trois enjeux :
+Enfin, la connexion au serveur Jenkins depuis le serveur GitHub crée une
+complexité injustifiée dans la chaîne CI/CD. L'adoption de GitHub Actions
+supprime ce besoin de connexion et regroupe l'hébergement du code et son
+déploiement. Les plugins sur GitHub Actions sont appelés des actions. La Société
+Générale dispose d'actions internes sur GitHub Actions qui offrent des
+fonctionnalités d'automatisation CI/CD. Une gouvernance quant à la gestion du
+cycle de vie de ces actions sera nécessaire et discutée au cours de ce mémoire.
+La Société Générale peut également bénéficier d'un écosystème d'actions
+officielles venant de comptes certifiés (Verified Creators) contrairement aux
+plugins communautaires de Jenkins qui ne sont pas certifiés. Ma stratégie de
+migration consiste à exploiter les actions certifiées de GitHub Actions pour
+automatiser la chaîne CI/CD et à utiliser les plugins internes de la Société
+Générale pour ses besoins spécifiques.
+
+Par ailleurs, les serveurs on-premises actuellement supportés seront décommissionnés
+cette année et doivent donc impérativement être remplacés. Je propose de migrer
+vers un cluster Kubernetes. Ce choix stratégique répond à trois enjeux :
 
 \begin{enumerate}
     \item \textbf{L'Immutabilité :} Contrairement aux serveurs on-premises
     historiques sujets à des conflits de configuration au fil des déploiements,
     l'usage de conteneurs éphémères assure une isolation de l'environnement
-    d'exécution en isolant chaque microservices et limite ainsi les effets de
+    d'exécution en isolant chaque microservice et limite ainsi les effets de
     bord. Les conteneurs permettent également de conserver la même configuration
     sans impacter l'infrastructure matérielle sous-jacente. Cela limite les
     besoins de maintenance au niveau de la configuration et simplifie la
-    maintenance de l'infrastructure ci/cd. Les conteneurs garantissent également
-    une configuration dîte iso-prod assurant que les dépendances du code source
-    en environnement de développement soit identique à celles en environnement
+    maintenance de l'infrastructure CI/CD. Les conteneurs garantissent également
+    une configuration dite iso-prod assurant que les dépendances du code source
+    en environnement de développement soient identiques à celles en environnement
     de production.
     \item \textbf{L'Élasticité :} La capacité d'\textit{autoscaling} permet
     d'adapter dynamiquement les ressources à la charge réelle, assurant la
@@ -88,18 +89,7 @@ une \textbf{conduite du changement} rigoureuse pour accompagner la montée en
 compétence des équipes vers une culture \textit{DevOps} autonome.
 
 De plus, afin d'éviter que la nouvelle solution ne devienne la dette technique
-de demain, nous aborderons les stratégies de \textbf{gestion des connaissances}
-(\textit{Knowledge Management}). À travers l'adoption de pratiques
-\textit{InnerSource} et la documentation \textit{as-code}, l'objectif est de
-pérenniser le savoir-faire et de garantir la maintenabilité à long terme de la
-chaîne de livraison.
-
-%\subsection*{Problem Statement} Define the main problem or question your essay
-% addresses
-
-%\subsection*{Objectives} Outline the goals and objectives of your work
-
-%\subsection*{Scope} Describe the scope and limitations of your essay
-
-%\subsection*{Organization} Briefly describe how the essay is structured and
-% organized
+de demain, nous aborderons les stratégies de \textit{knowledge management}. À
+travers l'adoption de pratiques \textit{InnerSource} et la documentation
+\textit{as-code}, l'objectif est de pérenniser le savoir-faire et de garantir la
+maintenabilité corrective et évolutive à long terme de la chaîne de livraison.
