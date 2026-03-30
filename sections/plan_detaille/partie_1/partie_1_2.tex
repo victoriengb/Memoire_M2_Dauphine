@@ -1,0 +1,30 @@
+\subsection{La JVM face au déterminisme financier}
+
+Cette section analyse les problèmes liés à la JVM en ce qui concerne le déterminisme de la latence et sa minimisation. Nous analyserons notamment les pauses Stop The World ou encore le pointer chasing
+
+Références: 
+
+\begin{itemize}
+    \item Tene, G. (2015). Understanding Java Garbage Collection and Latency.
+    \item Benjamin J. Evans Optimizing Java
+\end{itemize}
+
+\subsubsection{L'illusion du temps continu : Stop-The-World et Safepoints}
+
+En s'appuyant sur les travaux de Gil Tene, nous démontrerons que le principal obstacle au trading basse latence n'est pas la durée moyenne d'exécution, mais les interruptions imprévisibles appelées "hoquets" (hiccups). Nous analyserons le mécanisme de Stop-The-World (STW) : une phase où la JVM suspend l'exécution de tous les threads applicatifs pour permettre au Garbage Collector (GC) de manipuler la mémoire en toute sécurité. Nous introduirons le concept de Coordinated Omission : un biais de mesure où les outils de monitoring classiques "omettent" de comptabiliser le temps passé en pause STW, masquant ainsi des pics de latence catastrophiques pour la gestion du risque financier.
+
+Le mécanisme des Safepoints - Optimizing, Section 13.b.i Java Au-delà du GC, nous détaillerons le concept de Safepoint, "point de rendez-vous" imposé par la JVM. Nous expliquerons que pour suspendre l'application, la JVM doit amener chaque thread à un état stable. Nous analyserons le Time To Safepoint (TTSP) : le délai d'attente parfois long avant que le dernier thread ne s'arrête, créant une gigue (jitter) indépendante de la logique métier.
+Nous montrerons comment des boucles mal optimisées ou des opérations d'E/S bloquantes peuvent retarder l'atteinte d'un Safepoint, paralysant l'ensemble du moteur de matching.
+
+\subsubsection{La non-linéarité des performances : JIT et Warm-up}
+
+La dynamique de la compilation Just-In-Time - Optimizing Java, Chapitre 4. Contrairement au C++, le code Java n'est pas binaire au démarrage. Nous étudierons l'architecture HotSpot et ses deux compilateurs (C1 et C2). Nous détaillerons le processus de profilage : la JVM interprète d'abord le bytecode, identifie les méthodes critiques (hotspots) et les compile en code machine optimisé durant l'exécution. Nous justifierons ainsi la nécessité absolue du Warm-up (phase de chauffe) en HFT : l'obligation d'injecter des milliers de messages fictifs pour "entraîner" le compilateur JIT avant l'ouverture réelle du marché, évitant ainsi que les premiers ordres de la journée ne subissent la lenteur de l'interprétation.
+
+Le risque de Déoptimisation - Optimizing Java, Section 4.c.ii Nous aborderons un danger spécifique au trading : la déoptimisation. Nous expliquerons comment un changement soudain de régime de marché (ex: volatilité extrême modifiant les embranchements logiques) peut invalider les suppositions du compilateur. La JVM doit alors "dé-compiler" le code pour revenir à un état interprété avant de re-compiler, provoquant un pic de latence massif au moment précis où la réactivité est la plus cruciale.
+
+\subsubsection{L'obstacle de l'abstraction mémoire et du layout}
+
+L'overhead des objets et la barrière de l'indirection - Optimizing Java, Chapitre 11 Nous analyserons pourquoi la structure "tout-objet" de Java est inefficace pour la localité des caches étudiée en partie 1.1. Nous détaillerons le layout d'un objet Java (Object Header) : chaque instance consomme 12 à 16 octets de métadonnées inutiles au métier, augmentant la pression sur le cache L1. Nous démontrerons l'impact dévastateur des pointeurs (références) : dans une ArrayList<Order>, les données sont éparpillées en mémoire, forçant le processeur à multiplier les accès RAM (Pointer Chasing) et rendant le Hardware Prefetcher inopérant.
+
+L'Hypothèse Générationnelle et le GC - Optimizing Java, Section 6.c (p. 159-161) Enfin, nous exposerons l'incompatibilité entre le carnet d'ordres et le Garbage Collector.
+Nous expliquerons la Weak Generational Hypothesis : Java est conçu pour des objets qui meurent jeunes. Or, les ordres stockés dans un carnet d'ordres survivent longtemps, finissant par être déplacés dans la "Old Generation". Nous montrerons que le nettoyage de cette zone est beaucoup plus coûteux et génère des pauses STW plus longues, justifiant notre future transition vers une architecture Zero-Allocation où la mémoire est gérée manuellement hors du contrôle du GC.

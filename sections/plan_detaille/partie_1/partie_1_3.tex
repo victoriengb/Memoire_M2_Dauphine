@@ -1,0 +1,64 @@
+\subsection{Algorithmes de Matching et Structures de Données "Cache-Friendly"}
+
+Cette section explore la conception de structures de données capables de s'affranchir des goulots d'étranglement de la synchronisation Java standard pour exploiter pleinement le parallélisme matériel.
+
+Références:
+
+\begin{itemize}
+    \item Thompson, M., et al. (2011). Disruptor: High performance alternative to bounded queues.
+\end{itemize}
+\subsubsection{L'échec de la synchronisation standard : Le coût des verrous}
+
+\paragraph{Analyse de la contention - LMAX Disruptor (Section: Complexity)}
+
+Nous démontrerons pourquoi les structures de données classiques de la JVM (telles que ArrayBlockingQueue) sont inadaptées à l’ultra-basse latence.
+
+Le coût de l'arbitrage OS : Nous expliquerons que l'utilisation de verrous (locks ou synchronized) force le noyau Linux à intervenir pour arbitrer la concurrence. Ce processus déclenche des Context Switches (changements de contexte) coûteux, ruinant le déterminisme du temps de réponse.
+
+Le goulot d'étranglement de l'unité centrale : En s'appuyant sur le concept de "Uniprocessor Bottleneck", nous montrerons qu'une file d'attente avec un verrou unique transforme un système multi-cœurs en un système séquentiel où chaque cœur attend la libération d'une ressource unique.
+
+\begin{table}[h!]
+    \centering
+    \label{tab:comparaison_sync} % Label pour citer le tableau dans le texte avec \ref
+    \begin{tabular}{|l|r|} % 'r' pour aligner les chiffres à droite, c'est plus lisible
+        \hline
+        \textbf{Method} & \textbf{Time (ms)} \\ \hline
+        Single thread & 300 \\ \hline
+        Single thread with lock & 10,000 \\ \hline
+        Two threads with lock & 224,000 \\ \hline
+        Single thread with CAS & 5,700 \\ \hline
+        Two threads with CAS & 30,000 \\ \hline
+        Single thread with volatile write & 4,700 \\ \hline
+    \end{tabular}
+    \caption{Analyse comparative du coût de la synchronisation (en ms) \\ Source: LMAX Disruptor: High performance alternative to bounded queues for exchanging data between concurrent threads}
+\end{table}
+
+\subsubsection{Anatomie du Ring Buffer et du motif "Lock-Free"}
+
+\paragraph{Le principe du Single-Writer et des Memory Barriers - LMAX Disruptor}
+
+Nous détaillerons l'architecture du Ring Buffer comme alternative aux files d'attente liées.
+
+\begin{itemize}
+    \item La pré-allocation de mémoire: Nous justifierons l'utilisation d'un tableau circulaire de taille puissance de 2, permettant d'allouer tous les objets au démarrage. Cette approche garantit un régime de Zero-Allocation et une indexation ultra-rapide par masquage binaire.
+    \item Maîtrise de la cohérence de cache: Nous expliquerons comment le Disruptor remplace les verrous par des Memory Barriers (via le mot-clé volatile). En utilisant le protocole de cohérence de cache (MESI), nous montrerons comment les threads communiquent sans jamais bloquer l'exécution du CPU.
+\end{itemize}
+
+\subsubsection{Optimisation de la localité : Padding et Data-Oriented Design}
+
+\paragraph{Élimination du "False Sharing" - LMAX Disruptor (Section: False Sharing)}
+
+Nous aborderons la technique de Padding (remplissage) pour protéger l'intégrité des lignes de cache.
+
+\begin{itemize}
+    \item Isolation des curseurs : Nous démontrerons que si le curseur du "Producteur" et celui du "Consommateur" résident sur la même ligne de cache de 64 octets, chaque écriture invalide le cache de l'autre cœur. Nous expliquerons comment l'ajout de variables "mortes" (padding de 56 octets) garantit une isolation physique et une accélération massive des échanges.
+\end{itemize}
+
+\paragraph{Du modèle Objet au Data-Oriented Design}
+
+Enfin, nous introduirons la transition entre la programmation orientée objet classique et le design orienté données.
+
+\begin{itemize}
+    \item Array of Structures (AoS) vs Structure of Arrays (SoA): Nous comparerons le modèle classique (un tableau d'objets Order éparpillés) au modèle optimisé (des tableaux de primitifs long[] contigus).
+    \item Impact sur le Prefetcher: Nous prouverons que seule la structure contiguë permet au Hardware Prefetcher du CPU d'anticiper les lectures, réduisant les cache misses lors du parcours du carnet d'ordres.
+\end{itemize}

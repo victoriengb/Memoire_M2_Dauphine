@@ -1,0 +1,111 @@
+\section{Structure de la Solution et Implémentation Itérative}
+
+\subsection{Jalon 0: La Baseline Java et son impact sur la latence}
+
+Références
+
+\begin{itemize}
+    \item  Shipilëv, A. Java Object Layout (JOL)
+    \item Documentation. OpenJDK
+\end{itemize}
+
+Ce premier jalon technique vise à construire une implémentation fonctionnelle du moteur de matching en respectant les standards de développement Java conventionnels (POO classique). L'objectif n'est pas la performance, mais la création d'un point de référence permettant de mesurer l'impact réel des abstractions de la JVM sur la latence.
+
+\subsubsection{Architecture logicielle et Modélisation Objet}
+
+Dans cette phase, nous privilégions la lisibilité et la maintenabilité du code, conformément aux principes de l'ingénierie logicielle classique.
+
+\begin{itemize}
+    \item Modèle de données : Chaque ordre de bourse est représenté par une classe Order contenant des attributs standards (long id, double price, int quantity, Side side). Ces objets sont instanciés à chaque nouveau message reçu sur le réseau.
+    \item Gestion du Carnet d'ordres (Limit Order Book) : Pour stocker les ordres, nous utilisons des collections issues du package java.util. Les ordres d'achat et de vente sont triés dans deux TreeMap, permettant une recherche en O(log(n)) tout en maintenant l'ordre de priorité prix-temps.
+    \item Mécanismes de synchronisation : Afin de garantir l'intégrité des données face à des accès concurrents (ingestion réseau vs moteur de matching), le carnet d'ordres est protégé par des blocs synchronized ou des ReentrantLock.
+\end{itemize}
+
+\subsubsection{Analyse de la pression sur le Garbage Collector}
+
+L'un des enseignements majeurs de ce jalon est l'observation du cycle de vie des objets. Dans un environnement de trading à haute fréquence, le débit de messages peut atteindre plusieurs dizaines de milliers d'ordres par seconde.
+
+\begin{itemize}
+    \item L'instanciation massive: Chaque ordre créé génère environ 32 à 48 octets sur le tas (Heap). À un rythme de 100 000 ordres/seconde, l'application alloue plusieurs mégaoctets par seconde de données à très courte durée de vie.
+    \item Le phénomène de "Churn": Cette allocation frénétique remplit quasi instantanément la Young Generation (Eden Space). En utilisant des outils comme VisualVM ou JConsole, nous documentons la fréquence des "Minor GC".
+    \item Impact sur la latence: Bien que les Minor GC soient rapides, ils déclenchent des micro-pauses "Stop-The-World". Nous analyserons comment ces pauses, cumulées à la gestion des verrous, créent une instabilité chronique de la latence, même lorsque le processeur n'est pas à pleine charge.
+\end{itemize}
+
+\subsubsection{Mesures initiales et identification des goulots d'étranglement}
+
+Avant d'entamer toute optimisation, nous soumettons cette baseline à un stress-test rigoureux via un injecteur de trafic local.
+
+\begin{itemize}
+    \item Profil de latence: Les premières mesures devraient révéler une latence moyenne satisfaisante (ex: 500µs), mais une dégradation brutale dès le percentile P95. Le P99.99 peut s'envoler à plusieurs millisecondes, un délai rédhibitoire en HFT.
+    \item Contention sur les verrous: L'utilisation de Lock introduit une "file d'attente" logicielle. Nous utiliserons des Thread Dumps pour montrer que le thread de matching passe une partie significative de son temps à l'état BLOCKED ou WAITING, attendant que le thread réseau libère l'accès au carnet.
+    \item Localité des données: En examinant la structure des TreeMap, nous soulignerons que chaque entrée est un objet Node éparpillé dans la mémoire. Cette fragmentation empêche le CPU d'utiliser efficacement ses caches L1/L2, forçant de nombreux allers-retours vers la RAM (DRAM).
+\end{itemize}
+
+\subsection{Jalon 1: Le Séquenceur LMAX et l'ingestion ordonnée}
+
+Après avoir identifié les limites structurelles de la baseline (Jalon 0), ce deuxième jalon introduit le concept de RingBuffer inspiré du LMAX Disruptor. L'objectif est de supprimer la contention sur les verrous (locks) en organisant le flux de données de manière circulaire et séquentielle.
+
+\subsubsection{Architecture du RingBuffer: Un cercle de données pré-allouées}
+
+Contrairement aux files d'attente dynamiques (LinkedBlockingQueue), le RingBuffer est une structure de données à taille fixe, allouée au démarrage du système.
+
+\begin{itemize}
+    \item Le principe de l'indexation circulaire : Nous utilisons un tableau d'objets (Order[]) dont la taille est une puissance de deux (ex: 1024, 4096). Cette astuce mathématique permet de calculer l'index dans le tableau via un simple masque binaire (sequence \& (capacity - 1)), une opération beaucoup plus rapide qu'un modulo classique pour le processeur.
+    \item Pré-allocation et recyclage : Plutôt que de détruire et recréer des objets, le RingBuffer est rempli d'objets vides dès l'initialisation. Lors de l'arrivée d'un ordre, nous ne faisons que mettre à jour les attributs d'un objet existant.
+    \item Avantage matériel : Cette structure garantit une localité spatiale. Les données étant contiguës en mémoire, le Hardware Prefetcher du CPU peut anticiper les lectures, réduisant drastiquement les cache misses constatés en Jalon 0.
+\end{itemize}
+
+\subsubsection{Le modèle "Single-Writer"}
+
+La gigue (jitter) en Java provient souvent de la lutte entre threads pour obtenir un verrou. Le Jalon 1, s'inspirant du Disruptor, résout ce problème en imposant qu'un seul thread ait le droit d'écrire à un endroit donné du buffer.
+
+\begin{itemize}
+    \item Séparation des responsabilités:
+        \subitem Le Producer (Ingestor): Reçoit les paquets réseau et les dépose dans le RingBuffer.
+        \subitem Le Consumer (Matching Engine): Lit les messages et exécute la logique de matching.
+    \item Barrières de mémoire (Memory Barriers): La synchronisation ne se fait plus par synchronized, mais par la mise à jour d'une séquence volatile. En utilisant le protocole de cohérence de cache MESI, le thread de matching "voit" instantanément la nouvelle séquence publiée par le thread réseau sans qu'aucun des deux ne soit mis en pause par l'OS.
+    \item Suppression du Context Switching: Comme aucun thread n'est jamais bloqué en attente d'un moniteur, l'ordonnanceur Linux n'a pas besoin d'intervenir. Le thread de matching tourne en "busy-spin" (boucle infinie de lecture), garantissant une réactivité immédiate dès qu'un ordre apparaît.
+\end{itemize}
+
+\subsubsection{Analyse comparative des performances Jalon 0 contre Jalon 1}
+
+L'implémentation du séquenceur devrait transformer radicalement le profil de latence de notre moteur.
+
+\begin{itemize}
+    \item Réduction de la queue de latence: En supprimant les ReentrantLock, nous devrions éliminer les "pics" de plusieurs millisecondes. La distribution de latence devient beaucoup plus étroite (plus déterministe).
+    \item Débit (Throughput): Sans la surcharge liée à la gestion des verrous et à la création d'objets, le moteur est capable de traiter un volume d'ordres par seconde nettement supérieur.
+    \item Observation du "Back-pressure": Nous introduisons ici un mécanisme de contrôle : si le moteur de matching est trop lent, le RingBuffer se remplit. Le producteur doit alors attendre que de la place se libère. Cette "pression inverse" est essentielle pour éviter l'effondrement du système sous une charge extrême (flash crash).
+\end{itemize}
+
+Le passage au RingBuffer marque la fin de l'arbitrage logiciel. Cependant, un nouveau problème surgit : deux threads lisant et écrivant sur des séquences proches en mémoire peuvent se ralentir mutuellement au niveau du silicium. C'est ce que nous traiterons dans le Jalon 2 avec le False Sharing.
+
+\subsection{Jalon 2: Le Flyweight Pattern: Vers une empreinte mémoire constante}
+
+Dans les jalons précédents, chaque message entraînait encore la manipulation d'objets Java, même si ceux-ci étaient pré-alloués dans le RingBuffer. Le Flyweight Pattern (poids-mouche) pousse la logique du "Zero-Allocation" à son paroxysme.
+
+\begin{itemize}
+    \item Le décodeur unique: Au lieu de copier les données du buffer réseau vers un objet Order, nous créons un objet "Vue" unique. Cet objet ne contient pas de données, mais uniquement des méthodes d'accès (getters/setters) pointant vers un décalage (offset) dans un bloc de mémoire brute (DirectBuffer).
+    \item Suppression de l'indirection: En éliminant les références d'objets intermédiaires, nous supprimons ce que les experts appellent le "Pointer Chasing". Le CPU n'a plus besoin de suivre plusieurs adresses mémoire pour trouver une valeur ; il lit directement la donnée là où elle a été déposée par la carte réseau.
+    \item Impact sur le GC: Puisqu'aucun nouvel objet n'est manipulé lors du matching, la JVM ne détecte aucun changement d'état sur le tas (Heap). Le risque de déclenchement d'un cycle de nettoyage devient quasi nul en régime de croisière.
+\end{itemize}
+
+\subsubsection{Élimination du False Sharing par le Padding}
+
+Le processeur manipule la mémoire par blocs de 64 octets (Cache Lines). Un problème physique survient lorsque deux variables indépendantes, utilisées par deux cœurs différents, se retrouvent par mégarde sur la même ligne de cache.
+
+\begin{itemize}
+    \item Le conflit de cohérence (MESI) : Si le thread de réception met à jour le curseur tail et que le thread de matching lit le curseur head, et que ces deux variables sont côte à côte en mémoire, le CPU considère qu'il y a un conflit. Chaque écriture sur l'un force l'invalidation du cache de l'autre cœur, créant une latence artificielle massive.
+    \item La technique du Padding : Pour isoler nos variables critiques, nous insérons des champs "morts" (des types long inutilisés) avant et après nos curseurs. L'objectif est de "remplir" la ligne de cache pour que chaque "véritable" variable occupe seule ses 64 octets.
+    \item Vérification avec JOL (Java Object Layout) : Nous utilisons l'outil d'introspection d'OpenJDK pour vérifier l'alignement réel en mémoire. Nous apportons ainsi la preuve que nos structures sont physiquement isolées, garantissant que les cœurs CPU travaillent en parallèle sans se polluer mutuellement.
+\end{itemize}
+
+\subsubsection{Analyse de l'efficacité du pipeline d'instructions}
+
+L'application combinée du Flyweight et du Padding devrait transformer l'application en un moteur déterministe.
+
+\begin{itemize}
+    \item Stabilité du P99.99: En supprimant le False Sharing, nous devrions observer une disparition des "micro-pics" de latence qui persistaient en Jalon 1. La variance du temps de réponse s'approche de celle d'un système temps réel dédié.
+    \item Maximisation de l'IPC (Instructions Per Cycle): Grâce à la réduction des conflits de cache, le processeur peut exécuter plus d'instructions par cycle d'horloge. Le "coût" du passage d'un ordre dans le système devrait descendre sous la barre des quelques centaines de cycles CPU.
+\end{itemize}
+
+À ce stade, nous avons optimisé la machine locale au maximum des capacités de la JVM. Cependant, un moteur de trading isolé ne peut fonctionner seul. Le défi suivant consiste à sortir de la mémoire partagée pour affronter la latence du réseau, ce qui nous amène au Chapitre 2 avec l'implémentation d'Aeron.

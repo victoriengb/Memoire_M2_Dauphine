@@ -1,0 +1,40 @@
+\subsection{L’OS et le Réseau : Les obstacles à la distribution}
+
+Cette section analyse comment l'environnement d'exécution (le système d'exploitation) et les protocoles de communication peuvent anéantir les gains de performance obtenus au niveau du code si une stratégie d'isolation et d'optimisation binaire n'est pas rigoureusement appliquée.
+
+Références:
+\begin{itemize}
+    \item Systems Performance, Brendan Gregg (2020)
+    \item  FIX Trading Community (2019). Simple Binary Encoding Specification
+\end{itemize}
+
+\subsubsection{L’imprévisibilité de l’ordonnanceur Linux}
+
+\paragraph{Impact du Scheduler et des interruptions - Systems Performance, Brendan Gregg (2020)}
+Nous démontrerons que le système d'exploitation est, par nature, une source de gigue (jitter) pour les applications de trading haute fréquence.
+
+\begin{itemize}
+    \item Le coût du Context Switching : En s'appuyant sur les chapitres de Gregg, nous expliquerons comment l'ordonnanceur Linux peut interrompre notre thread de matching pour exécuter des tâches système. Ce mécanisme, bien qu'invisible en informatique standard, provoque des pics de latence P99.99 inacceptables en trading.
+    \item La pollution par les Interruptions (IRQs) : Nous analyserons comment les interruptions matérielles (provenant du réseau ou du disque) viennent "voler" des cycles CPU à l'application. Nous introduirons ici la solution technique de l'Isolation de Cœurs (isolcpus), visant à dédier des processeurs exclusifs au moteur de trading pour supprimer ce "bruit système".
+\end{itemize}
+
+\subsubsection{Du Kernel Stack au Kernel Bypass : Vers le Zero-Copy réseau}
+
+\paragraph{Les limites de la pile réseau standard - Brendan Gregg (2020)}
+
+Nous détaillerons le trajet complexe d'un paquet réseau TCP/UDP standard pour montrer son inefficacité en haute fréquence. 
+
+\begin{itemize}
+    \item Le goulot d'étranglement du passage en Kernel Space: Nous expliquerons que chaque paquet reçu doit être copié du tampon de la carte réseau vers l'espace noyau, puis vers l'espace utilisateur (User Space). Ce cycle de copie répétitif sature la bande passante mémoire et augmente la latence.
+    \item La révolution du Kernel Bypass: Nous présenterons les technologies permettant à l'application de lire directement les données sur la carte réseau (ex: Solarflare Onload, DPDK). Cette approche élimine l'intermédiaire de l'OS et permet d'atteindre des latences réseau déterministes et proches du matériel.
+\end{itemize}
+
+\subsubsection{Optimisation des messages : Simple Binary Encoding (SBE)}
+
+Nous justifierons le passage d'un protocole textuel (comme le FIX standard ou le JSON) vers un protocole binaire dense.
+
+\begin{itemize}
+    \item Le coût du parsing et de l'allocation: Nous démontrerons que transformer une chaîne de caractères en objet Java génère une pression inutile sur le Garbage Collector et consomme des cycles CPU précieux.
+    \item La philosophie SBE (Copy-Free / Allocation-Free): Nous expliquerons comment le protocole Simple Binary Encoding permet d'accéder aux données directement dans le tampon réseau. En utilisant un encodage à schéma fixe, SBE permet au CPU de lire les champs d'un message sans aucune étape intermédiaire de "décodage".
+    \item Alignement mémoire et efficacité CPU: Nous montrerons comment SBE aligne les données sur des frontières de 8 octets, permettant au processeur de charger les informations en un seul cycle d'horloge, maximisant ainsi l'usage des registres et du cache L1.
+\end{itemize}

@@ -1,0 +1,69 @@
+\section{État de l'art}
+\subsection{La physique de l'informatique appliquée à la programmation à faible latence}
+
+Références: 
+
+\begin{itemize}
+    \item Ulrich Drepper (2007) - What Every Programmer Should Know About Memory.
+    \item  J. L. Hennessy, D. A. Patterson (2017). Computer Architecture: A Quantitative Approach
+    \item Benjamin J. Evans Optimizing Java
+\end{itemize}
+
+
+\subsubsection{Les limites matérielles et les cycles CPU}
+
+\paragraph{Structure et type de RAM - Section 2.1 Drepper}
+
+Nous classerons la mémoire vive en deux types: les RAM statiques (SRAM) et les RAM dynamiques (DRAM). Nous expliquerons que la SRAM offre une meilleure vitesse d'accès à la donnée mais est peu dense (6 transistors par bit) ce qui entraîne un surcoût de production mais aussi d'espace dans la machine et de consommation énergétique. Pour régler ce problème, on a la DRAM qui est plus dense mais plus lente. 
+
+Nous insisterons sur le coût technique de la DRAM en montrant comment les cycles de rafraîchissement créent des fenêtres d'indisponibilité physique de la barette mémoire, introduisant une latence non-déterministe dès le niveau matériel.
+
+\paragraph{L'architecture NUMA et la distance physique - Section 2.2.2, Drepper}
+
+Au-delà du type de RAM utilisé, l'emplacement physique de la donnée est critique. Nous détaillerons l'architecture Non-Uniform Memory Access (NUMA) qui est standard sur les serveurs modernes. Nous expliquerons comment la distance physique entre le processeur et la barette de RAM crée deux classes d'accès: local (rapide) et remote (lent car traversant le bus d'interconnexion).
+
+Nous montrerons comment l'architecture NUMA est la source principale de la gigue: si le scheduler de l'OS déplace notre thread de matching d'hun cœur à un autre, le coût d'accès à ses données peut doubler instantanément.
+
+\subsubsection{Hiérarchie des caches et mécanique d'accès}
+
+\paragraph{Les différents types de cache - Section 3.1, Drepper}
+
+Après avoir exposé la latence de la RAM principale, nous présenterons la hiérarchie de mémoire cache (L1, L2, L3) conçue pour masquer cette lenteur. Nous commenterons un schéma d'architecture pour illustrer le coût exponentiel des accès: de quelques cycles pour le L1 à plusieurs centaines pour la RAM.
+
+Nous détaillerons la spécialisation des caches de niveau 1, séparés en L1i (Instructions) et L1d (Données), en expliquant pourquoi cette architecture est cruciale pour éviter que le chargement du code ne ralentisse le chargement du carnet d'ordres.
+
+\subsubsection{Les opérations en cache et la "Cache Line" - Section 3.2, Drepper}
+
+Nous définirons ici le concept de ligne de cache (cache line), typiquement de 64 octets. Nous expliquerons que le CPU ne charge jamais un octet isolé mais toujours un bloc complet.
+
+Nous présenterons les processus de Cache Miss (défaut de cache) et de Cache Eviction, en montrant comment un code mal structuré force le processeur à attendre inefficacement les données venant de la RAM.
+
+\subsubsection{Optimisation de l’usage du cache - Section 6.2, Drepper}
+
+Nous présenterons des méthodes d'optimisation tirées de Drepper, en nous concentrant sur l'accès séquentiel.
+Nous apporterons la preuve que l'organisation en structures de données contiguës (tableaux) permet d'activer le Hardware Prefetcher. Nous expliquerons comment ce composant matériel anticipe les besoins du programme en chargeant les données en cache avant même que l'instruction de lecture ne soit exécutée, réduisant drastiquement le temps de traitement total.
+Nous présenterons également des applications de Hennessy \& Patterson pour limiter les cache miss (données absentes du cache qui force une recherche dans un cache de niveau inférieur voire dans la mémoire vive):
+
+\begin{itemize}
+    \item Tirer parti de la spatial locality (des instructions qui sont proches en mémoire tendent à être utilisées ensemble) pour créer de plus gros blocs contenant plus d’instructions et ainsi limiter les accès au cache. Cela réduit également le compulsatory miss mais augmente le miss penalty
+    \item Je présenterai 3 métriques à optimiser relativement au cache: le hit time, miss rate et miss penalty avec les techniques ci-dessous:
+    \begin{itemize}
+        \item Augmentation de la taille des blocs (Cache Lines) : L'utilisation de blocs plus larges permet de réduire les compulsory misses en exploitant la localité spatiale. Dans notre moteur, cela justifie l'utilisation de structures de données contiguës (tableaux de primitifs) : charger un prix permet de charger "gratuitement" les prix suivants déjà présents dans la même ligne de cache.
+        \item Caches multi-niveaux (Multilevel Caches) : L'introduction de niveaux intermédiaires (L2, L3) réduit la miss penalty. Nous étudierons comment le dimensionnement de notre carnet d'ordres doit idéalement tenir dans le cache L2 ou L3 pour éviter une chute brutale des performances lors de l'accès à la RAM.
+        \item Associativité du cache : Le processeur utilise l'associativité pour éviter que deux adresses mémoire différentes ne se "battent" pour le même emplacement physique en cache (conflict misses). Nous aborderons l'impact du cache placement sur le déterminisme des calculs.
+        \item Priorité aux lectures (Read Priority) : Les processeurs modernes utilisent des tampons d'écriture (Write Buffers). Cela permet de traiter en priorité les lectures (critiques pour la décision de trading) avant de confirmer les écritures en mémoire. Nous verrons comment le mot-clé volatile en Java peut perturber ce mécanisme en forçant le vidage du tampon.
+        \item Évitement de la traduction d'adresse: Le cache utilise des index virtuels pour gagner du temps sur la traduction d'adresse par la MMU (Memory Management Unit).
+        \item Le compromis Taille vs Latence: Conformément aux observations de Hennessy \& Patterson, un cache plus grand réduit les défauts de capacité mais augmente mécaniquement le temps d'accès (hit time). Cette dualité sera au cœur de notre choix de structures de données "compactes" (Bit-packing) pour rester dans les couches de cache les plus rapides.
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{Mesurer la performance - Section 1.8 Hennessy \& Patterson}
+
+Dans cette partie, nous comparerons deux métriques fondamentales de la performance: le \textbf{throughput} (débit) qui désigne le volume d'opérations traitées par période de temps et le \textbf{temps de réponse} (latence) qui mesure le délai d'exécution d'une instruction isolée. Dans le cadre de ce mémoire, nous nous focaliserons sur la latence. En effet, la rentabilité d'un algorithme dépend de sa capacité à réagir à un signal de marché plus vite que ses concurrents.
+
+Nous privilégierons le \textbf{Wall Clock Time} (temps réel écoulé) car il englobe l'intégralité des délais subis par le programme: accès mémoire, opérations d'entrée/sortie et la surcharge système (OS overhead). À l'inverse, le \textbf{CPU Time} sera considéré comme incomplet car il ignore les phases d'attente (comme les pauses du Garbage Collector ou les interruptions réseau) qui sont pourtant critique en production.
+
+De plus, nous rejetterons la latence moyenne au profit de l'analyse des percentiles et plus particulièrement la latence P99.99 qui indique que 99.99\% des programmes auront une latence inférieure à celle mesurée. Ce choix se justifie car, en finance, un seul pic de latence peut entraîner des pertes de plusieurs millions d'euros. Cette réalité est totalement masquée par la moyenne arithmétique. Pour qualifier notre progrès, nous mesurerons le gain en vitesse d'exécution entre chaque jalon.
+
+Enfin pour respecter la reproductibilité de nos mesures (critère essentiel d'un benchmark selon Hennessy et Patterson), nous utiliserons le framework \textbf{Java Microbenchmark Harness (JMH)}. Cet outil, référence de l'industrie, permet d'isoler les biais de la JVM et garantie que les gains observés entre nos différents jalons sont statistiquement significatifs.
+
