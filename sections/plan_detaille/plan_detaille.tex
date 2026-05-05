@@ -3,6 +3,9 @@
 \usepackage{epigraph}
 \usepackage{graphicx}
 \usepackage[skip=10pt plus1pt, indent=0pt]{parskip}
+
+\usepackage{setspace}
+
 \input{../../packages}
 
 \begin{document}
@@ -11,13 +14,15 @@
     \begin{center}
         \includegraphics[height=1.5cm]{../../images/dauphine.png} \hfill
         \vspace{3cm}
-        \huge
+        \Large
         \textbf{Comment l’alignement de l’architecture logicielle sur les contraintes matérielles et le tuning de l’environnement d’exécution permettent-ils de transformer la Java Virtual Machine en une plateforme déterministe et distribuée pour le trading haute fréquence ?}
         \vspace{1.5cm}
+
         % Ton nom parfaitement centré
         \textbf{\Large Victorien GBAGUIDI}
         \vspace{2cm}
         \large
+        
         \begin{tabular}{c} % 'c' pour centrer tout le tableau
             Organisme d'accueil~: \textbf{Société Générale CIB} \\
             Tuteur Pédagogique~: \textbf{Khalid BELHAJJAME} \\
@@ -39,7 +44,9 @@
 \titleformat*{\section}{\LARGE\bfseries}
 
 \newpage
-\tableofcontents
+\begin{spacing}{1.5}
+    \tableofcontents
+\end{spacing}
 \newpage
 %\listoffigures UNCOMMENT \listoftables UNCOMMENT
 \newpage
@@ -77,6 +84,8 @@
 \input{partie_2/partie_2_3.tex}
 \input{partie_2/partie_2_4.tex}
 
+% Conclusion
+\input{conclusion.tex}
 %\include{sections/contexte} ADD A NEW FILE IN sections/ % AND PUT NEXT SECTIONS
 % HERE % \include{sections/conclusion}
 

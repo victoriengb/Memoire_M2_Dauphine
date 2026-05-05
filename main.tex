@@ -2,19 +2,37 @@
 \author{Victorien GBAGUIDI}
 \usepackage{epigraph}
 \usepackage{graphicx}
+\usepackage{float}
+\usepackage{svg}
+\usepackage{caption}
 \usepackage[skip=10pt plus1pt, indent=0pt]{parskip}
 \input{packages}
 
+\usepackage{booktabs}
+
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Définition du style pour les commandes bash
+\lstset{
+    backgroundcolor=\color{gray!10},
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    captionpos=b,
+    frame=single,
+    language=bash,
+    keywordstyle=\color{blue}
+}
 \begin{document}
 
 \begin{titlepage}
     \begin{center}
         \includegraphics[height=1.5cm]{dauphine.png} \hfill
         
-        \vspace{3cm}
+        \vspace{1.5cm}
         
         \huge
-        \textbf{Dans quelle mesure la modernisation technologique de la chaîne CI/CD, couplée à une stratégie de Knowledge Management, permet-elle de transformer l'obsolescence technique en levier stratégique ?}
+        \textbf{Comment l’alignement de l’architecture logicielle sur les contraintes matérielles et le tuning de l’environnement d’exécution permettent-ils de transformer la Java Virtual Machine en une plateforme déterministe et distribuée pour le trading haute fréquence ?}
         
         \vspace{1.5cm}
         
@@ -70,14 +88,21 @@
 % -------- Sections --------
 
 % Introduction
-\input{sections/introduction.tex}
+\input{sections/memoire_developpement/introduction.tex}
 
+% Partie 1
+
+\input{sections/memoire_developpement/partie_1/partie_1_1.tex}
+\input{sections/memoire_developpement/partie_1/partie_1_2.tex}
+\input{sections/memoire_developpement/partie_1/partie_1_3.tex}
+\input{sections/memoire_developpement/partie_1/partie_1_4.tex}
+\input{sections/memoire_developpement/partie_1/partie_1_5.tex}
 
 %\include{sections/contexte} ADD A NEW FILE IN sections/ % AND PUT NEXT SECTIONS
 % HERE % \include{sections/conclusion}
 
 % Bibliography
 \addcontentsline{toc}{section}{Bibliography}
-%\include{sections/bibliography}
+\include{sections/bibliography.tex}
 
 \end{document}

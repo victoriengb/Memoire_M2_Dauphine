@@ -1,0 +1,26 @@
+\subsection{La JVM face au déterminisme financier}
+L'efficience du \textit{matching engine} sur le chemin critique est également conditionnée par la gestion du cycle de vie des objets. L'utilisation de la mémoire conventionnelle de la JVM (\textit{Heap}) expose le système aux pauses \textit{Stop-The-World} (STW) du \textit{Garbage Collector}. Ces interruptions, nécessaires à la récupération des objets non-référencés, introduisent un indéterminisme structurel majeur et une gigue imprévisible, incompatibles avec les enjeux de faible latence. L'industrie privilégie des structures de données \textit{off-heap} ou, à défaut, des agrégats contigus de types primitifs permettant de réduire drastiquement la densité du graphe d'objets et la pression sur le collecteur.
+
+De surcroît, cet abandon de la sémantique objet permet de s'affranchir du phénomène de \textit{pointer chasing}. Dans une structure d'objets liés (telle qu'une liste chaînée), l'adresse de l'élément suivant n'est connue qu'au chargement complet de l'élément courant. Cela empêche toute anticipation et provoque des calages systématiques du pipeline (\textit{stalls}). À l'inverse, un agencement contigu en mémoire permet au \textit{hardware prefetcher} d'identifier un motif d'accès linéaire. Par simple incrémentation de pointeur, le CPU peut alors anticiper les requêtes vers la DRAM et masquer la latence d'accès en pré-chargeant les données critiques dans les caches supérieurs.
+
+%Références: 
+
+%\begin{itemize}
+%    \item Tene, G. (2015). Understanding Java Garbage Collection and Latency.
+%    \item Benjamin J. Evans Optimizing Java
+%\end{itemize}
+
+\subsubsection{L'illusion du temps continu : Stop-The-World et Safepoints}
+Dans ses travaux (\textit{Understanding Java Garbage Collection}), Gil Tene démontre que l'intégralité des implémentations de collecteurs, y compris les versions dites « précises », introduisent des pauses inévitables. Le cycle de vie d'un collecteur repose sur trois opérations critiques :
+
+\begin{itemize}
+    \item l'identification des objets vivants (objets utilisés par le programme)
+    \item la récupération des ressources
+    \item la relocalisation des données
+\end{itemize}
+
+Ces opérations peuvent être effectuées successivement (\textit{Mark/Sweep/Compact Collector}) ou en une fois (\textit{Copy Collector}). Pour les deux collecteurs, l'opération de relocalisation des données (par compactage ou par copie vers un nouvel espace mémoire) est la plus coûteuse. Si certaines phases peuvent être exécutées de manière concurrente, la phase de mouvement des objets (\textit{Evacuation}) nécessite de mettre à jour l'intégralité des références, imposant un arrêt complet de l'application : le STW.
+
+Selon les métriques de Tene, ces pauses peuvent atteindre une seconde par gigaoctet de tas (\textit{heap}), créant une gigue massive totalement décorrélée de la logique métier. À l'échelle de la basse latence, une pause d'une seconde crée une gigue seize millions de fois supérieure à un accès DRAM, une éternité informatique qui rend la gestion automatique de la mémoire incompatible avec les exigences du HFT. D'après un sondage parmi les participants à la conférence de Tene le tas d'une application oscille généralement entre 1Go et 4Go.
+
+Cette réalité physique impose à l'industrie HFT une stratégie de contournement radicale : la migration des données critiques vers des structures hors-tas (\textit{off-heap}). En soustrayant le \textit{matching engine} à la juridiction du \textit{Garbage Collector}, l'objectif n'est pas seulement de réduire la durée des collectes, mais d'éliminer purement et simplement le risque d'indisponibilité asynchrone sur le chemin critique.

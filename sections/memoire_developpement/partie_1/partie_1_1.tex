@@ -1,0 +1,50 @@
+\section{État de l'art — Le Mur de la Mémoire et les Limites du Logiciel}
+
+\subsection{La physique de l'informatique appliquée à la programmation à faible latence}
+
+\subsubsection{Les limites matérielles et les cycles CPU}
+
+\paragraph{Structure et type de RAM : }
+
+Privilégier la SRAM (Static RAM), support physique des mémoires caches, à la DRAM (Dynamic RAM) permet de bénéficier d'un déterminisme temporel intrinsèque à sa structure à bascule qui s'affranchit des cycles de rafraîchissement de la DRAM. À l'inverse, cette dernière introduit un indéterminisme structurel : la nécessité de régénérer périodiquement la charge de ses condensateurs crée des fenêtres d'indisponibilité asynchrones, générant de la gigue sur le chemin critique du \textit{matching engine}.
+
+Dès lors, l'enjeu n'est plus seulement de minimiser la latence mais aussi de maximiser la localité spatiale et temporelle des structures de données du \textit{matching engine} pour optimiser le hit rate (indicateur mesurant le taux de données récupérées depuis le cache sans devoir solliciter la DRAM). Nous limitons ainsi les accès à la mémoire principale, garantissant une exécution déterministe minimisant les cycles d'attente.
+
+\paragraph{Les opérations en cache : }
+
+La performance d'un \textit{matching engine} dépend de l'accès aux données. Le tableau \ref{tab:latency_cycles} illustre la hiérarchie des latences selon les chiffres de Drepper. Supposons un processeur qui a un cycle d'horloge de 0.25ns (i.e une fréquence de 4GHz), l'écart de performance entre un cache L1 (~1ns) et la mémoire principale (~60ns) met en évidence l'impact critique des \textit{caches misses}. Une absence des informations au sein du cache impose un temps d'attente de 240 cycles durant lesquels le processeur demeure inactif.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{@{}ll@{}}
+        \toprule
+        \textbf{Destination} & \textbf{Latence (Cycles CPU)} \\ 
+        \midrule
+        Registres            & $\le 1$                      \\
+        Cache L1d            & $\sim 3$                     \\
+        Cache L2             & $\sim 14$                    \\
+        Mémoire principale   & $\sim 240$                   \\ 
+        \bottomrule
+    \end{tabular}
+    \caption{Hiérarchie des latences d'accès mémoire en cycles CPU}
+    \label{tab:latency_cycles}
+\end{table}
+
+Cette disparité impose deux contraintes majeures pour le développement du \textit{matching engine}:
+
+\begin{itemize}
+    \item la densité informationnelle : l'usage d'objets Java standards introduit une surcharge mémoire via les en-têtes d'objets. Pour optimiser la probabilité de résidence des ordres dans la \textit{cache line} (unité logique de 64 octets), des structures de données contiguës basées sur des types primitifs seront privilégiées.
+    \item  l'exploitation du \textit{hardware prefetcher}: ce composant anticipe les besoins du processeur en chargeant les données futures basées sur la localité spatiale. Une organisation mémoire éparpillée (inhérente aux listes chaînées par exemple) neutralise ce mécanisme, forçant des accès répétés à la DRAM qui dégradent fortement les performances du \textit{matching engine}
+\end{itemize}
+
+La compréhension de ces micro-mécanismes matériels révèle la volatilité extrême de la performance à l'échelle de la nanoseconde. Dès lors que l'exécution n'est plus linéaire mais rythmée par les cycles d'attente du processeur (\textit{CPU stalls}), les outils de métrologie conventionnels deviennent insuffisants. Afin de valider l'efficacité de nos optimisations sur le chemin critique, il convient d'adopter une méthodologie de mesure rigoureuse, capable d'isoler les biais logiciels et de quantifier précisément la gigue du système.
+
+\subsubsection{Mesurer la performance}
+
+Pour mesurer la performance d'un programme, nous avons deux métriques fondamentales : le \textit{\textbf{throughput}} (débit) qui désigne le volume d'opérations traitées par période de temps et la \textbf{latence} qui mesure le délai d'exécution d'une instruction isolée. Dans le cadre de ce mémoire, nous nous focaliserons sur la latence. En effet, la rentabilité d'un algorithme dépend de sa capacité à réagir à un signal de marché plus vite que ses concurrents.
+
+Nous privilégierons le \textit{\textbf{Wall Clock Time}} (temps réel écoulé) car il englobe l'intégralité des délais subis par le programme: accès mémoire, opérations d'entrée/sortie et la surcharge système (OS overhead). À l'inverse, le \textit{\textbf{CPU Time}} sera considéré comme incomplet car il ignore les phases d'attente (comme les pauses du Garbage Collector ou les interruptions réseau) qui sont pourtant critiques en production.
+
+De plus, nous rejetterons la latence moyenne au profit de l'analyse des percentiles et plus particulièrement la latence P99.995 qui indique que 99.995\% des mesures auront une latence inférieure ou égale à la valeur seuil. En finance de marché, l'usage de la moyenne arithmétique serait une erreur méthodologique majeure car elle masque les valeurs aberrantes capables d'engendrer des pertes de plusieurs millions d'euros. Ce choix du P99.995 s'appuie sur les démonstrations de Gil Tene concernant les probabilités de subir les pires latences. Tene démontre que pour une session utilisateur standard, par exemple le chargement de cinq pages web impliquant chacune quarante ressources, la probabilité d'être exposé à au moins une occurrence dépassant le seuil P95 grimpe à 99,007\%. Même au seuil P99.9, environ 18\% des utilisateurs subissent encore ces pics de latence. Dès lors, pour garantir que plus de 99\% des sessions de trading s'exécutent sans rencontrer de gigue majeure, il est mathématiquement impératif de viser le percentile P99.995. Cette métrique devient notre étalon pour quantifier le gain de performance réel entre chaque jalon de développement. Nous prendrons également soin de systématiquement mettre en évidence la latence maximale pour toujours avoir une vision sur le pire des cas et la limiter. 
+
+Enfin pour respecter la reproductibilité de nos mesures (critère essentiel d'un benchmark selon Hennessy et Patterson), nous utiliserons le framework \textit{\textbf{Java Microbenchmark Harness (JMH)}}. Cet outil, référence de l'industrie, permet d'isoler les biais de la JVM tels que l'élimination de code mort et de gérer le \textit{warmup} (phase de compilation du programme en code natif au système). Il garantit que les gains observés entre nos différents jalons sont statistiquement significatifs. L'usage de JMH est d'autant plus critique qu'il permet de minimiser les biais d'omission coordonnée (\textit{coordinated omission}). JMH inclut les pauses du système, là où un benchmark plus naïf ignorerait ces périodes d'inactivité.

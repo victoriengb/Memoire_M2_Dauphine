@@ -1,0 +1,56 @@
+\subsection{Analyse Comparative des Solutions Industrielles}
+
+Cette section synthétise les stratégies de pointe adoptées par les leaders de l'industrie (LMAX, Chronicle, QuestDB) pour transformer les contraintes physiques et logicielles étudiées précédemment en avantages compétitifs.
+
+Références:
+
+\begin{itemize}
+    \item Lawrey, P. (2017). Chronicle Software: Low Latency Microservices
+    \item Documentation technique d'Aeron Messaging
+\end{itemize}
+
+\subsubsection{Agrona et la gestion de la mémoire "Off-Heap"}
+
+Nous analyserons comment la bibliothèque Agrona permet de s'affranchir des limites de la gestion mémoire standard de la JVM.
+
+\begin{itemize}
+    \item Manipulation directe des buffers : Nous détaillerons l'usage des DirectBuffer et UnsafeBuffer qui permettent de lire et d'écrire directement dans la mémoire native, hors du contrôle du Garbage Collector. Cette approche élimine totalement les pauses STW liées au nettoyage des objets temporaires.
+    \item Collections primitives et évitement de l'Autoboxing : Nous montrerons comment Agrona remplace les collections Java standards par des structures (ex: Int2ObjectHashMap) conçues pour manipuler des types primitifs, supprimant ainsi l'overhead mémoire des objets wrappers (Integer, Long).
+\end{itemize}
+
+\subsubsection{Chronicle Software: Persistance et Communication Inter-Processus (IPC)}
+
+La fin du paradigme réseau traditionnel - Lawrey (2017) Nous étudierons l'approche de Chronicle Software qui permet à deux processus Java de partager le même segment de RAM physique via le noyau pour s'affranchir de la latence au niveau des communications réseau.
+
+\begin{itemize}
+    \item L'exploitation des Memory Mapped Files: Nous expliquerons le fonctionnement des fichiers mappés en mémoire (MappedByteBuffer). En permettant à deux processus Java de partager le même segment de RAM physique via le noyau, Chronicle atteint des latences de communication inférieures à la microseconde, surpassant largement les sockets TCP/UDP.
+    \item Déterminisme et Auditabilité : Nous soulignerons l'avantage majeur de cette architecture : la persistance native. La persistance est assurée de manière transparente par le noyau via le mécanisme de Page Cache, permettant une écriture asynchrone sur disque sans bloquer le thread critique.
+\end{itemize}
+
+\subsubsection{QuestDB et l'organisation orientée colonnes}
+
+\paragraph{Du modèle Objet au Data-Oriented Design}
+
+Nous introduirons la transition entre la programmation orientée objet classique et le design orienté données.
+
+\begin{itemize}
+    \item Array of Structures (AoS) vs Structure of Arrays (SoA): Nous comparerons le modèle classique (un tableau d'objets Order éparpillés) au modèle optimisé (des tableaux de primitifs long[] contigus).
+    \item Impact sur le Prefetcher: Nous prouverons que seule la structure contiguë permet au Hardware Prefetcher du CPU d'anticiper les lectures, réduisant les cache misses lors du parcours du carnet d'ordres.
+\end{itemize}
+
+Nous ferons le lien avec le Data-Oriented Design(DOD) à travers l'exemple du moteur de stockage QuestDB.
+
+\begin{itemize}
+    \item Le stockage en colonnes (Column-based) : Nous expliquerons pourquoi regrouper les données par type (tous les prix ensemble, toutes les quantités ensemble) est supérieur au stockage par ligne pour le calcul intensif. Cette organisation maximise le taux de Cache Hit en permettant au CPU de traiter des vecteurs de données contigus.
+    \item Alignement et Vectorisation : Nous montrerons comment cette structure facilite l'utilisation des instructions SIMD (Single Instruction, Multiple Data) du processeur, permettant de traiter plusieurs ordres en un seul cycle d'horloge.
+\end{itemize}
+
+\subsubsection{Synthèse vers une approche "Zero-GC / Bit-Packed"}
+
+En conclusion de cet état de l'art, nous définirons l'approche hybride retenue pour notre projet:
+
+\begin{itemize}
+\item \textbf{La stratégie Zero-GC:} En combinant les DirectBuffers d'Agrona et les principes de pré-allocation du Disruptor, nous viserons une exécution où aucun objet n'est instancié sur le chemin critique. Cette approche élimine non seulement les pauses du Garbage Collector, mais supprime également la surcharge mémoire liée aux en-têtes d'objets Java (Object Headers).
+
+\item \textbf{L'optimisation par "Bit-Packing":} Pour surpasser les structures de données classiques, nous introduirons le concept de compression binaire. En compactant les informations essentielles (ID, prix, quantité) au sein de types primitifs long via des opérations de décalage (bit-shifting), nous réduirons l'empreinte mémoire au minimum. Cette densité maximale vise à maintenir les niveaux de prix les plus actifs au sein du cache L1 du processeur, minimisant ainsi les cycles d'attente lors de l'accès à la mémoire vive.
+\end{itemize}

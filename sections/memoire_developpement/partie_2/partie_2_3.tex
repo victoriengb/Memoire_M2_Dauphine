@@ -1,0 +1,82 @@
+L'optimisation du transport réseau réalisée au chapitre précédent a déplacé le goulot d'étranglement vers la logique interne du carnet d'ordres (Limit Order Book). Ce chapitre détaille la transition d'une modélisation orientée objet vers une architecture orientée données (Data-Oriented Design), visant une localité de cache absolue.
+
+Références
+
+\begin{itemize}
+    \item Documentation officielle de Java NIO (New I/O)
+    \item Documentation sun.misc.Unsafe
+\end{itemize}
+
+\subsection{Jalon 5: Limit Order Book en Data-Oriented Design (DOD)}
+
+Le carnet d'ordres (Limit Order Book) constitue le cœur réactif du système. Dans les jalons précédents, malgré l'usage du RingBuffer, la structure interne du carnet restait dépendante d'une approche orientée objet (AoS - Array of Structures). Ce jalon marque une rupture fondamentale : nous déconstruisons l'objet Order pour adopter une architecture orientée données (Data-Oriented Design), alignée sur la hiérarchie des caches du CPU.
+
+\subsubsection{La fin de l'indirection : Du modèle AoS au modèle SoA}
+
+En Java standard, un carnet d'ordres est souvent une collection d'objets. Chaque objet Order possède sa propre adresse mémoire, forçant le CPU à "chasser des pointeurs" (Pointer Chasing) pour accéder aux données.
+
+\begin{itemize}
+    \item Le problème de la fragmentation : Dans un modèle AoS, pour comparer les prix de dix ordres, le CPU doit charger dix segments de mémoire différents. Si ces segments ne sont pas contigus, le processeur subit des Cache Misses systématiques, tombant de la vitesse du cache L1 (1 ns) à celle de la DRAM (100 ns).
+    \item La solution SoA (Structure of Arrays) : Nous réorganisons la mémoire en regroupant les données par type. Tous les prix sont stockés dans un tableau primitif long[] prices, et toutes les quantités dans un long[] quantities.
+    \item Exploitation du Hardware Prefetcher : En rangeant les prix de manière contiguë, nous permettons au processeur de détecter un accès séquentiel. Le Prefetcher anticipe alors la lecture des prix suivants avant même que l'instruction ne soit exécutée, garantissant que la donnée est déjà présente dans le cache L1 au moment du matching.
+\end{itemize}
+
+\subsubsection{Densité et Vitesse : le Bit-Packing}
+
+Pour maximiser l'efficacité de chaque ligne de cache (64 octets), nous cherchons à stocker le plus d'informations possible dans le moins d'espace possible. Nous utilisons pour cela le Bit-Packing.
+
+\begin{itemize}
+    \item Compression sans perte: Un type long en Java occupe 64 bits. En trading, un prix et une quantité n'ont souvent pas besoin de 64 bits chacun. Nous "packons" deux entiers de 32 bits dans un seul long.
+        \subitem Exemple : long packedOrder = (price << 32) | (quantity \& 0xFFFFFFFFL);
+    \item Réduction de la bande passante mémoire: Cette technique divise par deux le volume de données transitant entre la RAM et le CPU. Puisque le processeur est capable de manipuler des registres de 64 bits de manière atomique, nous extrayons le prix ou la quantité via des masques binaires (bit-masking) en un seul cycle d'horloge.
+    \item Évitement des types flottants: Le Bit-Packing nous impose de travailler avec des entiers (Fixed-point arithmetic). Cela supprime le coût de passage par l'unité de calcul flottant (FPU) et élimine les imprécisions d'arrondi critiques en finance.
+\end{itemize}
+
+\subsubsection{Algorithmes "Branchless" et prédictibilité du pipeline}
+
+Le matching d'ordres repose sur des comparaisons (ex: if (bidPrice >= askPrice)). Cependant, les branchements conditionnels mal prédits par le CPU peuvent vider le pipeline d'exécution, causant une perte de 15 à 20 cycles.
+
+\begin{itemize}
+    \item Élimination des sauts conditionnels : Nous réécrivons les fonctions critiques en utilisant des opérations logiques ou des opérateurs ternaires que le compilateur JIT peut transformer en instructions CMOV (Conditional Move).
+    \item Déterminisme algorithmique : En rendant le chemin d'exécution identique, que l'ordre soit exécuté ou non, nous stabilisons le temps de traitement. Le prédicteur de branchement du CPU n'est plus "pollué" par la volatilité du marché, garantissant une latence constante même lors des pics d'activité.
+    \item Vectorisation potentielle : Cette structure de données contiguë prépare le terrain pour l'utilisation des instructions SIMD (Single Instruction, Multiple Data). Dans les versions futures (via Project Panama), nous pourrions comparer quatre prix simultanément en une seule instruction processeur.
+\end{itemize}
+
+L'application du DOD et du Bit-Packing transforme le carnet d'ordres en une machine de calcul binaire pure. Le moteur de matching ne traite plus des "ordres", mais des "flux de bits" optimisés pour le silicium. Une fois cette performance de calcul atteinte, le dernier défi est de s'assurer que l'écriture des logs ne ralentit pas cette mécanique : c'est l'objet de la section sur la persistance Zero-copy.
+
+\subsection{Jalon 6 : Persistance Zero-Copy via MappedByteBuffer}
+
+Dans un système financier, la performance ne peut se faire au détriment de la résilience. Chaque exécution d'ordre doit être journalisée pour répondre aux exigences de conformité (MiFID II) et permettre une récupération après sinistre. Cependant, les appels système classiques d'écriture sur disque (write()) introduisent des pauses inacceptables. Le Jalon 6 résout ce dilemme par l'implémentation d'une persistance "native" via les fichiers mappés en mémoire.
+
+\subsubsection{Le mécanisme du Memory Mapping (mmap)}
+
+L'utilisation de java.nio.MappedByteBuffer permet de lier directement une portion de l'espace d'adressage virtuel de la JVM à un fichier physique sur le disque (SSD NVMe).
+
+\begin{itemize}
+    \item Suppression des copies entre espaces : Dans une architecture standard, une donnée est copiée du "User Space" (JVM) vers le "Kernel Space" (OS) avant d'atteindre le disque. Avec mmap, cette copie intermédiaire disparaît. Écrire un log revient à écrire dans un tableau d'octets (byte[]) en RAM.
+    \item Le rôle du Page Cache : C'est le noyau Linux qui prend la responsabilité de la persistance. Lorsqu'une page mémoire est modifiée ("dirty page"), le système d'exploitation la synchronise avec le support physique de manière asynchrone. Pour le moteur de matching, l'opération est quasi instantanée car elle s'effectue à la vitesse de la mémoire vive.
+    \item Accès Off-Heap : Ces buffers résident en dehors du tas Java (Heap). Par conséquent, même si le journal de transactions atteint plusieurs gigaoctets, il n'ajoute aucune charge de travail au Garbage Collector, car la JVM ne "scanne" pas cette zone mémoire lors de ses cycles de nettoyage.
+\end{itemize}
+
+\subsubsection{Architecture "Append-Only" et Sérialisation SBE}
+
+Pour maximiser le débit d'écriture et minimiser la fragmentation du SSD, nous adoptons une structure de journalisation purement séquentielle (Append-Only Log).
+
+\begin{itemize}
+    \item Journalisation binaire dense : Nous réutilisons le protocole SBE (étudié au Jalon 4) pour la persistance. Chaque événement (Trade, Cancel, NewOrder) est écrit sous forme d'une trame binaire de taille fixe. Cela permet non seulement de gagner de l'espace, mais aussi de garantir que le disque effectue des écritures alignées sur ses blocs physiques.
+    \item Récupération instantanée (Recovery) : En cas de crash, le redémarrage du système consiste simplement à "remapper" le fichier. Le moteur de matching peut alors relire le journal à la vitesse de la RAM pour reconstruire l'état exact du carnet d'ordres en quelques millisecondes.
+    \item Évitement du verrouillage de fichier : Nous utilisons des techniques de "Memory Barriers" pour nous assurer que l'index d'écriture est mis à jour atomiquement. Cela permet à un processus tiers (par exemple, un moteur de reporting) de lire le journal en temps réel sans jamais bloquer le moteur de matching principal.
+\end{itemize}
+
+\subsubsection{Optimisation du Flush et Durabilité}
+
+La contrepartie de la vitesse du mmap est le risque de perte de données en cas de coupure de courant si les pages ne sont pas encore "flushées" sur le disque.
+
+\begin{itemize}
+    \item Stratégies de synchronisation : Nous analysons le compromis entre msync(ASYNC) et msync(SYNC). En trading haute fréquence, on privilégie souvent la délégation au noyau (asynchrone) pour maintenir la latence, tout en s'appuyant sur une réplication réseau (Aeron) vers un second nœud pour la sécurité.
+    \item Alignement sur les Huge Pages : Pour optimiser encore l'accès, nous configurons l'OS pour utiliser des Huge Pages (2MB au lieu de 4KB). Cela réduit la taille de la table des pages du noyau et accélère la traduction d'adresses virtuelles en adresses physiques, un gain de quelques nanonsecondes crucial lors des rafales de transactions.
+\end{itemize}
+
+Nous avons démontré qu'il est possible de détourner la machine virtuelle Java de sa vocation originelle pour en faire un environnement de programmation système de haute performance. En fusionnant le Data-Oriented Design (DOD) et la persistance Zero-Copy, nous avons créé une symbiose où le code Java épouse la topologie du processeur au lieu de la subir.
+
+L'implémentation de la persistance Zero-copy clôture la phase de développement du moteur de matching. Nous avons maintenant un système capable de recevoir (Aeron), de transformer (SBE), d'exécuter (DOD) et de sauvegarder (mmap) un ordre de bourse sans jamais quitter le domaine de la microseconde. Nous allons maintenant nous attacher à prouver ces résultats par une méthodologie de benchmark scientifique.
