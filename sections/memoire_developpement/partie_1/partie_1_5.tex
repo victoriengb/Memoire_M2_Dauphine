@@ -1,56 +1,56 @@
 \subsection{Analyse Comparative des Solutions Industrielles}
 
-Cette section synthétise les stratégies de pointe adoptées par les leaders de l'industrie (LMAX, Chronicle, QuestDB) pour transformer les contraintes physiques et logicielles étudiées précédemment en avantages compétitifs.
-
-Références:
-
-\begin{itemize}
-    \item Lawrey, P. (2017). Chronicle Software: Low Latency Microservices
-    \item Documentation technique d'Aeron Messaging
-\end{itemize}
-
 \subsubsection{Agrona et la gestion de la mémoire "Off-Heap"}
 
-Nous analyserons comment la bibliothèque Agrona permet de s'affranchir des limites de la gestion mémoire standard de la JVM.
+\paragraph{Optimisation des structures de données via Agrona :}
 
-\begin{itemize}
-    \item Manipulation directe des buffers : Nous détaillerons l'usage des DirectBuffer et UnsafeBuffer qui permettent de lire et d'écrire directement dans la mémoire native, hors du contrôle du Garbage Collector. Cette approche élimine totalement les pauses STW liées au nettoyage des objets temporaires.
-    \item Collections primitives et évitement de l'Autoboxing : Nous montrerons comment Agrona remplace les collections Java standards par des structures (ex: Int2ObjectHashMap) conçues pour manipuler des types primitifs, supprimant ainsi l'overhead mémoire des objets wrappers (Integer, Long).
-\end{itemize}
+Pour pallier l'inefficience des collections de la JDK standard, nous intégrons la bibliothèque \textit{Agrona}. Les collections \texttt{java.util} souffrent de deux tares rédhibitoires pour la très basse latence : l'impossibilité de stocker des types primitifs (induisant un \textit{autoboxing} massif et une pression sur le \textit{Garbage Collector}) et la dispersion en mémoire des données entraînant un phénomène de \textit{pointer chasing}.
 
-\subsubsection{Chronicle Software: Persistance et Communication Inter-Processus (IPC)}
+Chaque objet Java possède un en-tête (\textit{Object Header}) de 12 à 16 octets, ajoutant une surcharge informationnelle et force le processeur à suivre des références vers des zones mémoires non contiguës. Les collections d'Agrona reposent sur des structures de données stockées dans des tableaux de primitifs contigus. Cette architecture favorise la localité spatiale : en plaçant les clés et les valeurs (dans le cadre des \textit{maps} et des \textit{sets}) de manière adjacente, Agrona maximise la probabilité qu'un couple de données réside dans une même \textit{cache line} de 64 octets. Ce design permet au \textbf{Hardware Prefetcher} du CPU d'anticiper les accès mémoire et de charger les données dans le cache L1 avant même leur sollicitation, masquant ainsi la latence de la DRAM.
 
-La fin du paradigme réseau traditionnel - Lawrey (2017) Nous étudierons l'approche de Chronicle Software qui permet à deux processus Java de partager le même segment de RAM physique via le noyau pour s'affranchir de la latence au niveau des communications réseau.
+\paragraph{Communication inter-threads et Ring Buffers :}
 
-\begin{itemize}
-    \item L'exploitation des Memory Mapped Files: Nous expliquerons le fonctionnement des fichiers mappés en mémoire (MappedByteBuffer). En permettant à deux processus Java de partager le même segment de RAM physique via le noyau, Chronicle atteint des latences de communication inférieures à la microseconde, surpassant largement les sockets TCP/UDP.
-    \item Déterminisme et Auditabilité : Nous soulignerons l'avantage majeur de cette architecture : la persistance native. La persistance est assurée de manière transparente par le noyau via le mécanisme de Page Cache, permettant une écriture asynchrone sur disque sans bloquer le thread critique.
-\end{itemize}
+Pour la communication \textit{inter-threads} nous utilisons le \texttt{OneToOneRingBuffer} d'Agrona. Contrairement aux files d'attente bloquantes de la JDK, cette structure est \textit{lock-free} et \textit{wait-free} pour le producteur. Conformément au \textit{pattern Disruptor}, nous aurons un producteur unique ayant les accès en écriture et des consommateurs qui feront des appels au \texttt{OneToOneRingBuffer} pour les accès en lecture. 
 
-\subsubsection{QuestDB et l'organisation orientée colonnes}
+\subsubsection{Chronicle Software : Persistance native et Communication Inter-Processus (\textit{IPC})}
 
-\paragraph{Du modèle Objet au Data-Oriented Design}
+Pour un \textit{matching engine}, la latence réseau entre la réception d'un ordre et son enregistrement est un facteur de compétitivité critique. L'approche de \textit{Chronicle Software} est de fusionner la communication entre les processus et la sauvegarde des données en une seule opération ultra-rapide basée sur la mémoire partagée.
 
-Nous introduirons la transition entre la programmation orientée objet classique et le design orienté données.
+\paragraph{Le fichier comme vecteur de communication et de persistance :}
 
-\begin{itemize}
-    \item Array of Structures (AoS) vs Structure of Arrays (SoA): Nous comparerons le modèle classique (un tableau d'objets Order éparpillés) au modèle optimisé (des tableaux de primitifs long[] contigus).
-    \item Impact sur le Prefetcher: Nous prouverons que seule la structure contiguë permet au Hardware Prefetcher du CPU d'anticiper les lectures, réduisant les cache misses lors du parcours du carnet d'ordres.
-\end{itemize}
+Dans une architecture classique, un ordre doit être envoyé via un \textit{socket} réseau puis sauvegardé dans une base de données (disque). Chronicle supprime cette double étape en utilisant les fichiers mappés en mémoire (\textit{Memory Mapped Files}). Le fichier sur disque est projeté directement dans la RAM. Écrire un message pour le transmettre à un autre processus revient donc à l'écrire directement dans le fichier en RAM qui sera directement visible.
 
-Nous ferons le lien avec le Data-Oriented Design(DOD) à travers l'exemple du moteur de stockage QuestDB.
+L'extrait suivant illustre comment l'écriture devient à la fois un acte de communication et un acte d'archivage :
 
-\begin{itemize}
-    \item Le stockage en colonnes (Column-based) : Nous expliquerons pourquoi regrouper les données par type (tous les prix ensemble, toutes les quantités ensemble) est supérieur au stockage par ligne pour le calcul intensif. Cette organisation maximise le taux de Cache Hit en permettant au CPU de traiter des vecteurs de données contigus.
-    \item Alignement et Vectorisation : Nous montrerons comment cette structure facilite l'utilisation des instructions SIMD (Single Instruction, Multiple Data) du processeur, permettant de traiter plusieurs ordres en un seul cycle d'horloge.
-\end{itemize}
+\begin{lstlisting}[language=Java, caption=Ecriture Off-Heap persistante avec Chronicle-Core]
+// 1. Ouverture du fichier journal (qui servira de canal de communication)
+FileChannel fc = new CleaningRandomAccessFile(fileName, "rw").getChannel();
 
-\subsubsection{Synthèse vers une approche "Zero-GC / Bit-Packed"}
+// 2. Mappage : le fichier devient une zone de RAM partagee entre les processus
+long address = OS.map(fc, MapMode.READ_WRITE, 0, 64 << 10);
 
-En conclusion de cet état de l'art, nous définirons l'approche hybride retenue pour notre projet:
+// 3. Persistance instantanee : l'ordre est ecrit en RAM, mais deja lie au disque
+OS.memory().writeLong(address + 1024L, 0x1234567890ABCDEFL);
 
-\begin{itemize}
-\item \textbf{La stratégie Zero-GC:} En combinant les DirectBuffers d'Agrona et les principes de pré-allocation du Disruptor, nous viserons une exécution où aucun objet n'est instancié sur le chemin critique. Cette approche élimine non seulement les pauses du Garbage Collector, mais supprime également la surcharge mémoire liée aux en-têtes d'objets Java (Object Headers).
+// 4. L'ordre est persiste et disponible pour les autres processus sans latence reseau
+\end{lstlisting}
 
-\item \textbf{L'optimisation par "Bit-Packing":} Pour surpasser les structures de données classiques, nous introduirons le concept de compression binaire. En compactant les informations essentielles (ID, prix, quantité) au sein de types primitifs long via des opérations de décalage (bit-shifting), nous réduirons l'empreinte mémoire au minimum. Cette densité maximale vise à maintenir les niveaux de prix les plus actifs au sein du cache L1 du processeur, minimisant ainsi les cycles d'attente lors de l'accès à la mémoire vive.
-\end{itemize}
+Comme la \textit{Gateway} et le \textit{Matching Engine} regardent le même fichier projeté en RAM, l'ordre n'est jamais déplacé. Sa présence dans le fichier suffit à le rendre "public" pour les autres composants. Chaque octet écrit est virtuellement déjà sur le disque. En cas de coupure de courant, le noyau Linux garantit que les données présentes dans cette RAM (le \textit{Page Cache}) sont les dernières enregistrées, permettant une reconstruction immédiate du carnet d'ordres au redémarrage.
+
+\paragraph{S'affranchir du \textit{Garbage Collector} et du disque :}
+
+La force de Chronicle est de rendre la persistance "invisible" pour le processeur. Le \textit{matching engine} ne subit jamais de ralentissement dû aux accès disques ou aux nettoyages de mémoire. L'écriture se fait à la vitesse de la RAM (nanosecondes). C'est le système d'exploitation qui, de manière asynchrone et en arrière-plan, synchronise physiquement les données sur le support disque. Le thread critique du moteur de matching ne bloque jamais pour attendre le disque. En utilisant la mémoire hors-tas (\textit{Off-Heap}), Chronicle ne crée aucun objet Java pour transporter l'ordre. On évite ainsi l'indéterminisme du \textit{Garbage Collector}.
+
+\begin{lstlisting}[language=Java, caption=Gestion deterministe et atomique]
+Memory memory = OS.memory();
+long address = memory.allocate(1024);
+try {
+// Modification atomique (CAS) : coordination sans verrou (lock-free)
+boolean swapped = memory.compareAndSwapInt(address, 1, 2);
+} finally {
+// Liberation manuelle : aucun nettoyage automatique imprevisible
+memory.freeMemory(address, 1024);
+}
+\end{lstlisting}
+
+L'usage de \texttt{compareAndSwapInt} (CAS) permet à plusieurs threads (par exemple le moteur de matching et le thread de reporting) de lire et modifier le journal d'ordres simultanément sans jamais se bloquer mutuellement. Le pipeline du processeur reste saturé d'instructions utiles, maximisant le débit d'ordres tout en garantissant que chaque transaction est immortalisée sur disque sans aucun sacrifice de vitesse.

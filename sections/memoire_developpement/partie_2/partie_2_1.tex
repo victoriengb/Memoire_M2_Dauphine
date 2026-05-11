@@ -13,6 +13,16 @@
 
 \section{Structure de la Solution et Implémentation Itérative}
 
+\subsubsection{Synthèse vers une approche "Zero-GC / Bit-Packed"}
+
+En conclusion de cet état de l'art, nous définirons l'approche hybride retenue pour notre projet:
+
+\begin{itemize}
+\item \textbf{La stratégie Zero-GC:} En combinant les DirectBuffers d'Agrona et les principes de pré-allocation du Disruptor, nous viserons une exécution où aucun objet n'est instancié sur le chemin critique. Cette approche élimine non seulement les pauses du Garbage Collector, mais supprime également la surcharge mémoire liée aux en-têtes d'objets Java (Object Headers).
+
+\item \textbf{L'optimisation par "Bit-Packing":} Pour surpasser les structures de données classiques, nous introduirons le concept de compression binaire. En compactant les informations essentielles (ID, prix, quantité) au sein de types primitifs long via des opérations de décalage (bit-shifting), nous réduirons l'empreinte mémoire au minimum. Cette densité maximale vise à maintenir les niveaux de prix les plus actifs au sein du cache L1 du processeur, minimisant ainsi les cycles d'attente lors de l'accès à la mémoire vive.
+\end{itemize}
+
 \subsection{Jalon 0: La Baseline Java et son impact sur la latence}
 
 Références
