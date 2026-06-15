@@ -1,10 +1,10 @@
-\section{État de l'art — Le Mur de la Mémoire et les Limites du Logiciel}
+\section{État de l'art — Le Mur de la Mémoire et les Limites de la JVM}
 
 \subsection{La physique de l'informatique appliquée à la programmation à faible latence}
 
 \subsubsection{Les limites matérielles et les cycles CPU}
 
-\paragraph{Structure et type de RAM : }
+\paragraph{Structure et type de RAM - Drepper, 2007 : }
 
 Privilégier la SRAM (Static RAM), support physique des mémoires caches, à la DRAM (Dynamic RAM) permet de bénéficier d'un déterminisme temporel intrinsèque à sa structure à bascule qui s'affranchit des cycles de rafraîchissement de la DRAM. À l'inverse, cette dernière introduit un indéterminisme structurel : la nécessité de régénérer périodiquement la charge de ses condensateurs crée des fenêtres d'indisponibilité asynchrones, générant de la gigue sur le chemin critique du \textit{matching engine}.
 
@@ -41,7 +41,7 @@ La compréhension de ces micro-mécanismes matériels révèle la volatilité ex
 
 \subsubsection{Mesurer la performance}
 
-Pour mesurer la performance d'un programme, nous avons deux métriques fondamentales : le \textit{\textbf{throughput}} (débit) qui désigne le volume d'opérations traitées par période de temps et la \textbf{latence} qui mesure le délai d'exécution d'une instruction isolée. Dans le cadre de ce mémoire, nous nous focaliserons sur la latence. En effet, la rentabilité d'un algorithme dépend de sa capacité à réagir à un signal de marché plus vite que ses concurrents.
+Pour mesurer la performance d'un programme, nous avons deux métriques fondamentales : le \textit{\textbf{throughput}} (débit) qui désigne le volume d'opérations traitées par période de temps et la \textbf{latence} qui mesure le délai d'exécution d'une instruction isolée. Dans le cadre de ce mémoire, nous nous focaliserons sur la latence. En effet, la rentabilité d'un \textit{matching engine} dépend de sa capacité à réagir à un signal de marché plus vite que ses concurrents.
 
 Nous privilégierons le \textit{\textbf{Wall Clock Time}} (temps réel écoulé) car il englobe l'intégralité des délais subis par le programme: accès mémoire, opérations d'entrée/sortie et la surcharge système (OS overhead). À l'inverse, le \textit{\textbf{CPU Time}} sera considéré comme incomplet car il ignore les phases d'attente (comme les pauses du Garbage Collector ou les interruptions réseau) qui sont pourtant critiques en production.
 

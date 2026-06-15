@@ -1,6 +1,6 @@
 \subsection{Vers une architecture \textit{lock-free}}
 
-La programmation concurrente conventionnelle repose sur l'exclusion mutuelle (\textit{mutex}) pour garantir l'intégrité des données. Ce modèle impose aux \textit{threads} un accès séquentiel aux ressources via des verrous (\textit{locks}), forçant les unités d'exécution concurrentes à l'inactivité. Comme l'illustre le tableau \ref{tab:comparaison_sync}, l'impact de la synchronisation est dévastateur : pour cinq cent millions d'incrémentations d'un compteur, le passage d'un \textit{thread} unique sans contrainte à une gestion avec verrous entre deux \textit{threads} fait exploser le temps d'exécution de 300 ms à 224 000 ms, soit un facteur supérieur à 700. Dès lors, pour atteindre des latences de l'ordre de la nanoseconde, le passage à une architecture \textit{lock-free} devient impératif. L'enjeu technique consiste à maintenir la cohérence des données sans interrompre le flux du processeur. Pour répondre à cette problématique, l'équipe de LMAX a introduit le \textit{Disruptor} : un \textit{pattern} basé sur une structure de données circulaire et l'utilisation d'instructions atomiques de bas niveau (\textit{Compare-And-Swap}), offrant une alternative haute performance aux files d'attente synchronisées traditionnelles.
+La programmation concurrente conventionnelle repose sur l'exclusion mutuelle (\textit{mutex}) pour garantir l'intégrité des données. Ce modèle impose aux \textit{threads} un accès séquentiel aux ressources via des verrous (\textit{locks}), forçant les unités d'exécution concurrentes à l'inactivité. Comme l'illustre le tableau \ref{tab:comparaison_sync}, l'impact de la synchronisation est dévastateur : pour cinq cent millions d'incrémentations d'un compteur, le passage d'un \textit{thread} unique sans contrainte à une gestion avec verrous entre deux \textit{threads} fait exploser le temps d'exécution de 300 ms à 224 000 ms, soit un facteur supérieur à 700. Dès lors, pour atteindre des latences de l'ordre de la nanoseconde, le passage à une architecture \textit{lock-free} devient impératif. L'enjeu technique consiste à maintenir la cohérence des données sans interrompre le flux du processeur. Pour répondre à cette problématique, l'équipe de LMAX a introduit le \textit{Disruptor} : un \textit{pattern} basé sur une structure de données circulaire offrant une alternative haute performance aux files d'attente synchronisées traditionnelles.
 
 \begin{table}[h!]
     \centering
@@ -30,7 +30,7 @@ La programmation concurrente conventionnelle repose sur l'exclusion mutuelle (\t
 
 Les travaux de l’équipe LMAX mettent en lumière une inefficacité structurelle des files d’attente (\textit{queues}) classiques dans un modèle producteur-consommateur. Lorsque la vitesse de consommation excède celle de la production, la taille de la file tend vers zéro, provoquant une contention systématique sur les mêmes adresses mémoires (tête et queue de file). Ce phénomène impose l’usage de verrous, dont l’arbitrage par le noyau système génère une latence paradoxalement supérieure à celle d'un modèle strictement séquentiel.
 
-En effet, l'utilisation d'un verrou délègue la gestion de la concurrence au système d'exploitation. Ce dernier est alors libre d'arbitrer l'exécution des threads, entraînant des changements de contexte coûteux. L'OS peut notamment suspendre des threads critiques au profit d'autres processus, provoquant une "pollution" des caches : les données utiles sont évincées pour laisser place à de nouvelles instructions, forçant les threads du système de trading à les recharger depuis la mémoire RAM. Cette rupture de la localité des données génère une instabilité de la latence (jitter) incompatible avec les exigences de haute performance.
+En effet, l'utilisation d'un verrou délègue la gestion de la concurrence au système d'exploitation. Ce dernier est alors libre d'arbitrer l'exécution des threads, entraînant des changements de contexte coûteux. L'OS peut notamment suspendre des threads critiques au profit d'autres processus, provoquant une "pollution" des caches : les données utiles sont évincées pour laisser place à de nouvelles instructions, forçant les threads du système de trading à les recharger depuis la mémoire RAM. Cette rupture de la localité des données génère une instabilité de la latence incompatible avec les exigences de haute performance.
 
 \begin{figure}[H] % [H] force l'image à rester exactement ici
     \centering % Centre l'image sur la page
@@ -48,13 +48,13 @@ Par ailleurs, l'architecture des processeurs modernes complexifie le partage de 
     \label{fig:cpu} % Label pour faire référence à l'image dans le texte
 \end{figure}
 
-\subsubsection{Anatomie du Ring Buffer et du \textit{pattern} "\textit{Lock-Free}"}
+\subsubsection{Anatomie du Ring Buffer et du \textit{pattern} "\textit{Disruptor}"}
 
-\paragraph{Le principe du Single-Writer et des Memory Barriers - LMAX Disruptor}
+\paragraph{Le principe du Single-Writer et des Memory Barriers - LMAX Disruptor :}
 
 Afin de pallier les limitations induites par les verrous, l’équipe LMAX a conçu le \textit{Disruptor}, une architecture dont le cœur est un \textit{ring buffer} (tampon circulaire) implémenté sous forme de tableau contigu dont la taille est une puissance de 2, ce qui permet de substituer l'opérateur modulo par un masque binaire pour gérer l'indexation circulaire. Ce modèle repose sur une séparation stricte des responsabilités de gestion d'index. Dans une configuration simple, le producteur dispose de l'exclusivité d'écriture dans le tampon et incrémente son propre compteur de séquence pour signaler la disponibilité de nouvelles données.
 
-De son côté, le consommateur accède aux données en lecture seule sans modifier l'état interne de la structure partagée. Il maintient son propre curseur qu'il compare, via une barrière de lecture, à celui du producteur ; cette vérification lui permet de déterminer instantanément le volume de données disponibles (batching). Réciproquement, le producteur surveille la progression du consommateur (mécanisme de \textit{gating}) afin de s'assurer qu'il ne boucle pas sur l'anneau au point d'écraser des événements non encore traités. Cette coordination asymétrique permet une communication inter-threads totalement libre de verrous (lock-free).
+De son côté, le consommateur accède aux données en lecture seule sans modifier l'état interne de la structure partagée. Il maintient son propre curseur qu'il compare, via une barrière de lecture, à celui du producteur ; cette vérification lui permet de déterminer instantanément le volume de données disponibles. Réciproquement, le producteur surveille la progression du consommateur afin de s'assurer qu'il ne boucle pas sur l'anneau au point d'écraser des événements non encore traités. Cette coordination asymétrique permet une communication inter-threads totalement libre de verrous (\textit{lock-free}).
 
 \begin{figure}[H] % [H] force l'image à rester exactement ici
     \centering % Centre l'image sur la page
@@ -63,15 +63,10 @@ De son côté, le consommateur accède aux données en lecture seule sans modifi
     \label{fig:disruptor} % Label pour faire référence à l'image dans le texte
 \end{figure}
 
-\begin{itemize}
-    \item La pré-allocation de mémoire: Nous justifierons l'utilisation d'un tableau circulaire de taille puissance de 2, permettant d'allouer tous les objets au démarrage. Cette approche garantit un régime de Zero-Allocation et une indexation ultra-rapide par masquage binaire.
-    \item Maîtrise de la cohérence de cache: Nous expliquerons comment le Disruptor remplace les verrous par des Memory Barriers (via le mot-clé volatile). En utilisant le protocole de cohérence de cache (MESI), nous montrerons comment les threads communiquent sans jamais bloquer l'exécution du CPU.
-\end{itemize}
-
 \subsubsection{Optimisation de la localité : Padding et Data-Oriented Design}
 
 \paragraph{Élimination du \textit{False Sharing}}
 
-Le \textit{false sharing} (partage factice) survient lorsque plusieurs \textit{threads}, s'exécutant sur des cœurs distincts, accèdent à des variables différentes mais situées sur la même ligne de cache (généralement 64 octets). Bien que les variables soient logiquement indépendantes, toute modification de l'une entraîne l'invalidation de la ligne de cache entière pour les autres cœurs, provoquant une contention invisible et coûteuse.
+Le \textit{false sharing} survient lorsque plusieurs \textit{threads}, s'exécutant sur des cœurs distincts, accèdent à des variables différentes mais situées sur la même ligne de cache (généralement 64 octets). Bien que les variables soient logiquement indépendantes, toute modification de l'une entraîne l'invalidation de la ligne de cache entière pour les autres cœurs, provoquant une contention invisible et coûteuse.
 
 Pour neutraliser ce phénomène, le \textit{Disruptor} emploie la technique du \textit{padding} : elle consiste à entourer les variables critiques (comme les compteurs de séquence) de variables factices afin d'isoler chaque donnée sur sa propre ligne de cache. Cette isolation garantit que le producteur et le consommateur travaillent sur des segments matériels distincts, préservant ainsi la localité des données et maximisant l'efficacité des caches L1 et L2.

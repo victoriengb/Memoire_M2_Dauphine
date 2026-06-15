@@ -1,134 +1,107 @@
-%\subsubsection{La non-linéarité des performances : JIT et Warm-up}
-
-%La dynamique de la compilation Just-In-Time - Optimizing Java, Chapitre 4. Contrairement au C++, le code Java n'est pas binaire au démarrage. Nous étudierons l'architecture HotSpot et ses deux compilateurs (C1 et C2). Nous détaillerons le processus de profilage : la JVM interprète d'abord le bytecode, identifie les méthodes critiques (hotspots) et les compile en code machine optimisé durant l'exécution. Nous justifierons ainsi la nécessité absolue du Warm-up (phase de chauffe) en HFT : l'obligation d'injecter des milliers de messages fictifs pour "entraîner" le compilateur JIT avant l'ouverture réelle du marché, évitant ainsi que les premiers ordres de la journée ne subissent la lenteur de l'interprétation.
-
-%Le risque de Déoptimisation - Optimizing Java, Section 4.c.ii Nous aborderons un danger spécifique au trading : la déoptimisation. Nous expliquerons comment un changement soudain de régime de marché (ex: volatilité extrême modifiant les embranchements logiques) peut invalider les suppositions du compilateur. La JVM doit alors "dé-compiler" le code pour revenir à un état interprété avant de re-compiler, provoquant un pic de latence massif au moment précis où la réactivité est la plus cruciale.
-
-%\subsubsection{L'obstacle de l'abstraction mémoire et du layout}
-
-%L'overhead des objets et la barrière de l'indirection - Optimizing Java, Chapitre 11 Nous analyserons pourquoi la structure "tout-objet" de Java est inefficace pour la localité des caches étudiée en partie 1.1. Nous détaillerons le layout d'un objet Java (Object Header) : chaque instance consomme 12 à 16 octets de métadonnées inutiles au métier, augmentant la pression sur le cache L1. Nous démontrerons l'impact dévastateur des pointeurs (références) : dans une ArrayList<Order>, les données sont éparpillées en mémoire, forçant le processeur à multiplier les accès RAM (Pointer Chasing) et rendant le Hardware Prefetcher inopérant.
-
-%L'Hypothèse Générationnelle et le GC - Optimizing Java, Section 6.c (p. 159-161) Enfin, nous exposerons l'incompatibilité entre le carnet d'ordres et le Garbage Collector.
-%Nous expliquerons la Weak Generational Hypothesis : Java est conçu pour des objets qui meurent jeunes. Or, les ordres stockés dans un carnet d'ordres survivent longtemps, finissant par être déplacés dans la "Old Generation". Nous montrerons que le nettoyage de cette zone est beaucoup plus coûteux et génère des pauses STW plus longues, justifiant notre future transition vers une architecture Zero-Allocation où la mémoire est gérée manuellement hors du contrôle du GC.
-
 \section{Structure de la Solution et Implémentation Itérative}
 
-\subsubsection{Synthèse vers une approche "Zero-GC / Bit-Packed"}
-
-En conclusion de cet état de l'art, nous définirons l'approche hybride retenue pour notre projet:
-
+Un \textit{matching engine} suit la logique du \textit{price-time priority}: 
 \begin{itemize}
-\item \textbf{La stratégie Zero-GC:} En combinant les DirectBuffers d'Agrona et les principes de pré-allocation du Disruptor, nous viserons une exécution où aucun objet n'est instancié sur le chemin critique. Cette approche élimine non seulement les pauses du Garbage Collector, mais supprime également la surcharge mémoire liée aux en-têtes d'objets Java (Object Headers).
-
-\item \textbf{L'optimisation par "Bit-Packing":} Pour surpasser les structures de données classiques, nous introduirons le concept de compression binaire. En compactant les informations essentielles (ID, prix, quantité) au sein de types primitifs long via des opérations de décalage (bit-shifting), nous réduirons l'empreinte mémoire au minimum. Cette densité maximale vise à maintenir les niveaux de prix les plus actifs au sein du cache L1 du processeur, minimisant ainsi les cycles d'attente lors de l'accès à la mémoire vive.
+    \item les ordres d'achat les plus élevés sont priorisés par rapport à ceux plus faibles
+    \item les ordres de vente les plus bas sont priorisés par rapport à ceux plus élevés
 \end{itemize}
 
-\subsection{Jalon 0: La Baseline Java et son impact sur la latence}
+Lorsque le prix de vente le plus faible correspond au prix d'achat le plus élevé (par comparaison d'infériorité), un \textit{match} a lieu et la transaction prend place, au prix de l'ordre déjà présent dans le carnet (l'ordre \textit{résident}). Pour deux \textit{matchs} équivalents en termes de prix, la priorité est donnée selon une condition temporelle (premier arrivé, premier servi). Un \textit{matching engine} dans l'industrie est responsable de plusieurs tâches : vérifier que les prix d'échange ne sont pas complètement décorrélés du marché, s'assurer d'appliquer l'appétence au risque de l'entreprise par rapport aux quantités et au prix global des actifs achetés, etc. Pour ce mémoire, nous nous contenterons d'appliquer le \textit{price-time priority} sur des données ingérées depuis un générateur artificiel et nous excluerons toutes les fonctionnalités annexes d'un \textit{matching engine}.
 
-Références
+\subsection{Conception générale du \textit{matching engine}}
 
-\begin{itemize}
-    \item  Shipilëv, A. Java Object Layout (JOL)
-    \item Documentation. OpenJDK
-\end{itemize}
+\subsubsection{Contexte métier et technique}
 
-Ce premier jalon technique vise à construire une implémentation fonctionnelle du moteur de matching en respectant les standards de développement Java conventionnels (POO classique). L'objectif n'est pas la performance, mais la création d'un point de référence permettant de mesurer l'impact réel des abstractions de la JVM sur la latence.
+Notre \textit{matching engine} est un \textit{Proof of Concept} qui simule le cœur d'une plateforme d'échange électronique. Les acteurs du système sont de deux natures : en amont, un \textbf{générateur d'ordres synthétiques} qui représente les participants de marché (\textit{market makers}, traders algorithmiques) en émettant des ordres d'achat et de vente ; en aval, un \textbf{système de persistance} qui consomme les transactions exécutées, jouant le rôle d'un système de reporting réglementaire.
 
-\subsubsection{Architecture logicielle et Modélisation Objet}
+L'enjeu qui justifie ce mémoire est le suivant : les marchés financiers modernes exigent une réactivité que les architectures logicielles managées classiques (telles qu'une JVM standard) ne garantissent pas nativement. Chaque microseconde de latence représente un risque financier quantifiable, notamment en cas de mouvement de marché brutal. Le \textit{matching engine} doit donc assurer la fiabilité et le déterminisme des transactions sans intervention humaine, et ce, en continu (le moteur s'exécute sans interruption planifiée). Un jeu de données de test sera utilisé pour garantir la consistance des résultats entre les différentes versions du moteur. L'enjeu central de ce mémoire reste l'optimisation de la latence et du déterminisme du programme.
 
-Dans cette phase, nous privilégions la lisibilité et la maintenabilité du code, conformément aux principes de l'ingénierie logicielle classique.
+\subsubsection{Exigences fonctionnelles du \textit{matching engine}}
 
-\begin{itemize}
-    \item Modèle de données : Chaque ordre de bourse est représenté par une classe Order contenant des attributs standards (long id, double price, int quantity, Side side). Ces objets sont instanciés à chaque nouveau message reçu sur le réseau.
-    \item Gestion du Carnet d'ordres (Limit Order Book) : Pour stocker les ordres, nous utilisons des collections issues du package java.util. Les ordres d'achat et de vente sont triés dans deux TreeMap, permettant une recherche en O(log(n)) tout en maintenant l'ordre de priorité prix-temps.
-    \item Mécanismes de synchronisation : Afin de garantir l'intégrité des données face à des accès concurrents (ingestion réseau vs moteur de matching), le carnet d'ordres est protégé par des blocs synchronized ou des ReentrantLock.
-\end{itemize}
-
-\subsubsection{Analyse de la pression sur le Garbage Collector}
-
-L'un des enseignements majeurs de ce jalon est l'observation du cycle de vie des objets. Dans un environnement de trading à haute fréquence, le débit de messages peut atteindre plusieurs dizaines de milliers d'ordres par seconde.
+Le \textit{matching engine} permet strictement de :
 
 \begin{itemize}
-    \item L'instanciation massive: Chaque ordre créé génère environ 32 à 48 octets sur le tas (Heap). À un rythme de 100 000 ordres/seconde, l'application alloue plusieurs mégaoctets par seconde de données à très courte durée de vie.
-    \item Le phénomène de "Churn": Cette allocation frénétique remplit quasi instantanément la Young Generation (Eden Space). En utilisant des outils comme VisualVM ou JConsole, nous documentons la fréquence des "Minor GC".
-    \item Impact sur la latence: Bien que les Minor GC soient rapides, ils déclenchent des micro-pauses "Stop-The-World". Nous analyserons comment ces pauses, cumulées à la gestion des verrous, créent une instabilité chronique de la latence, même lorsque le processeur n'est pas à pleine charge.
+    \item générer des ordres d'achat et de vente de \textit{commodities} en temps réel (avec prix et quantité)
+    \item annuler des ordres émis
+    \item actualiser le prix d'un ordre émis
+    \item autoriser des \textit{matchs} partiels (par exemple, si un acteur veut vendre 10 unités et qu'un autre souhaite en acheter 5, le \textit{match} a lieu sur 5 unités, et l'ordre de vente reste actif pour les 5 unités restantes)
+    \item faire le \textit{matching} entre les ordres selon le \textit{price-time priority}
+    \item persister les transactions effectuées
 \end{itemize}
 
-\subsubsection{Mesures initiales et identification des goulots d'étranglement}
+Tout ordre qui ne trouve pas immédiatement de contrepartie n'est pas rejoué : il reste dans le carnet d'ordres (à l'état \textit{resting}) en attendant un \textit{match} futur ou une annulation. Il s'agit du comportement nominal d'un carnet d'ordres, et non d'une fonctionnalité additionnelle.
 
-Avant d'entamer toute optimisation, nous soumettons cette baseline à un stress-test rigoureux via un injecteur de trafic local.
+Le \textit{matching engine} ne gère pas :
+\begin{itemize}
+    \item les types d'ordres autres que le \textit{limit order} (\textit{market order}, \textit{stop order}, \textit{iceberg order} sont exclus)
+    \item le multi-instruments : le système opère sur un instrument unique (mono-instrument). L'extension à plusieurs instruments impliquerait un carnet d'ordres et potentiellement un thread de \textit{matching} dédiés par instrument.
+    \item la fermeture des marchés (il tourne en continu)
+    \item le contrôle de cohérence entre le prix d'un ordre et le marché, ni la gestion du risque (appétence au risque, exposition globale)
+    \item la sécurité des transactions et l'authentification des acteurs
+    \item la tolérance aux pannes et la réplication
+\end{itemize}
+
+\subsubsection{Exigences non-fonctionnelles du \textit{matching engine}}
+
+Les exigences suivantes constituent la \textbf{cible visée pour la version finale optimisée} du moteur. La \textit{baseline} (Jalon 0), dépourvue de toute optimisation, est attendue de dépasser significativement ces seuils — notamment à cause des pauses \textit{Stop-The-World} du \textit{Garbage Collector} — et c'est précisément cet écart, mesuré jalon après jalon, qui constitue le fil conducteur de l'implémentation.
 
 \begin{itemize}
-    \item Profil de latence: Les premières mesures devraient révéler une latence moyenne satisfaisante (ex: 500µs), mais une dégradation brutale dès le percentile P95. Le P99.99 peut s'envoler à plusieurs millisecondes, un délai rédhibitoire en HFT.
-    \item Contention sur les verrous: L'utilisation de Lock introduit une "file d'attente" logicielle. Nous utiliserons des Thread Dumps pour montrer que le thread de matching passe une partie significative de son temps à l'état BLOCKED ou WAITING, attendant que le thread réseau libère l'accès au carnet.
-    \item Localité des données: En examinant la structure des TreeMap, nous soulignerons que chaque entrée est un objet Node éparpillé dans la mémoire. Cette fragmentation empêche le CPU d'utiliser efficacement ses caches L1/L2, forçant de nombreux allers-retours vers la RAM (DRAM).
+    \item \textbf{Déterminisme} : un même jeu de données d'entrée doit produire exactement les mêmes \textit{matchs}, dans le même ordre.
+    \item \textbf{Latence} : latence P99.995 de bout en bout de l'ordre de la cinquantaine de microsecondes, et une latence maximale inférieure à la milliseconde, pour la version finale.
+    \item \textbf{Débit} : la baseline est testée à une charge de référence de 10 000 opérations par seconde. La version finale optimisée vise un débit cible de l'ordre du million d'opérations par seconde — un objectif ambitieux mais ancré dans la littérature industrielle (LMAX revendique 6 millions d'ordres par seconde sur un seul thread en régime pleinement optimisé).
+    \item \textbf{Bornage des prix} : les prix sont bornés à un intervalle fixe, par exemple $[0, 100\,000]$ exprimés en centimes (soit $0$ à $1\,000{,}00$ unités monétaires). Ce bornage est une hypothèse de conception qui justifiera, dans les jalons avancés, l'encodage des prix en entiers (arithmétique à virgule fixe) plutôt qu'en \texttt{double}.
+    \item \textbf{Durabilité} : pour la baseline, chaque transaction exécutée est journalisée de manière synchrone dans un fichier CSV, sur le chemin critique. Cette approche naïve, génératrice de latence, sera remise en cause au Jalon 6 par une persistance \textit{Zero-Copy}.
 \end{itemize}
 
-\subsection{Jalon 1: Le Séquenceur LMAX et l'ingestion ordonnée}
+\subsubsection{Modèle de données}
 
-Après avoir identifié les limites structurelles de la baseline (Jalon 0), ce deuxième jalon introduit le concept de RingBuffer inspiré du LMAX Disruptor. L'objectif est de supprimer la contention sur les verrous (locks) en organisant le flux de données de manière circulaire et séquentielle.
-
-\subsubsection{Architecture du RingBuffer: Un cercle de données pré-allouées}
-
-Contrairement aux files d'attente dynamiques (LinkedBlockingQueue), le RingBuffer est une structure de données à taille fixe, allouée au démarrage du système.
+Les données fondamentales du \textit{matching engine}, sans optimisation, sont les suivantes :
 
 \begin{itemize}
-    \item Le principe de l'indexation circulaire : Nous utilisons un tableau d'objets (Order[]) dont la taille est une puissance de deux (ex: 1024, 4096). Cette astuce mathématique permet de calculer l'index dans le tableau via un simple masque binaire (sequence \& (capacity - 1)), une opération beaucoup plus rapide qu'un modulo classique pour le processeur.
-    \item Pré-allocation et recyclage : Plutôt que de détruire et recréer des objets, le RingBuffer est rempli d'objets vides dès l'initialisation. Lors de l'arrivée d'un ordre, nous ne faisons que mettre à jour les attributs d'un objet existant.
-    \item Avantage matériel : Cette structure garantit une localité spatiale. Les données étant contiguës en mémoire, le Hardware Prefetcher du CPU peut anticiper les lectures, réduisant drastiquement les cache misses constatés en Jalon 0.
+    \item \texttt{Side} (énumération)
+        \begin{itemize}
+            \item \texttt{BUY}, \texttt{SELL}
+        \end{itemize}
+    \item \texttt{OrderCommand} — représente une intention émise par le générateur d'ordres
+        \begin{itemize}
+            \item \texttt{commandType}: enum (\texttt{NEW}, \texttt{CANCEL}, \texttt{MODIFY})
+            \item \texttt{orderId}: Long
+            \item \texttt{side}: Side
+            \item \texttt{price}: Double \textit{(borné, cf. exigences non-fonctionnelles)}
+            \item \texttt{quantity}: Integer \textit{(quantité initiale pour \texttt{NEW}, nouvelle quantité pour \texttt{MODIFY}, ignorée pour \texttt{CANCEL})}
+            \item \texttt{createdAt}: Long
+        \end{itemize}
+    \item \texttt{Order} — état d'un ordre tel que conservé dans le carnet
+        \begin{itemize}
+            \item \texttt{orderId}: Long
+            \item \texttt{side}: Side
+            \item \texttt{price}: Double
+            \item \texttt{originalQuantity}: Integer
+            \item \texttt{remainingQuantity}: Integer
+            \item \texttt{createdAt}: Long
+            \item \texttt{status}: enum (\texttt{RESTING}, \texttt{PARTIALLY\_FILLED}, \texttt{FILLED}, \texttt{CANCELLED})
+        \end{itemize}
+    \item \texttt{Trade} — résultat d'un \textit{match}
+        \begin{itemize}
+            \item \texttt{tradeId}: Long
+            \item \texttt{buyOrderId}: Long
+            \item \texttt{sellOrderId}: Long
+            \item \texttt{executionPrice}: Double \textit{(prix de l'ordre résident, cf. règle de \textit{price-time priority})}
+            \item \texttt{quantity}: Int
+            \item \texttt{executedAt}: Long
+        \end{itemize}
 \end{itemize}
 
-\subsubsection{Le modèle "Single-Writer"}
+\textit{Source: Stock Exchange System Design | Order Matching, Trading Engine \& Scalability Explained - Youtube}
 
-La gigue (jitter) en Java provient souvent de la lutte entre threads pour obtenir un verrou. Le Jalon 1, s'inspirant du Disruptor, résout ce problème en imposant qu'un seul thread ait le droit d'écrire à un endroit donné du buffer.
+\subsubsection{Architecture du matching engine}
+
+Notre objectif étant d'optimiser la latence de notre programme, nous minimisons les communications réseau et inter-processus. Nous optons pour une architecture monolithique modulaire à trois modules, communiquant via une \texttt{LinkedBlockingQueue} — une structure bloquante standard du JDK, choisie délibérément pour la baseline afin de fournir un point de comparaison avec le \textit{Ring Buffer} introduit au Jalon 1 :
 
 \begin{itemize}
-    \item Séparation des responsabilités:
-        \subitem Le Producer (Ingestor): Reçoit les paquets réseau et les dépose dans le RingBuffer.
-        \subitem Le Consumer (Matching Engine): Lit les messages et exécute la logique de matching.
-    \item Barrières de mémoire (Memory Barriers): La synchronisation ne se fait plus par synchronized, mais par la mise à jour d'une séquence volatile. En utilisant le protocole de cohérence de cache MESI, le thread de matching "voit" instantanément la nouvelle séquence publiée par le thread réseau sans qu'aucun des deux ne soit mis en pause par l'OS.
-    \item Suppression du Context Switching: Comme aucun thread n'est jamais bloqué en attente d'un moniteur, l'ordonnanceur Linux n'a pas besoin d'intervenir. Le thread de matching tourne en "busy-spin" (boucle infinie de lecture), garantissant une réactivité immédiate dès qu'un ordre apparaît.
+    \item \textbf{Module de génération} : produit des \texttt{OrderCommand} (\texttt{NEW}, \texttt{CANCEL}, \texttt{MODIFY}) à intervalles aléatoires et les dépose dans la file partagée à destination du module de \textit{matching}.
+    \item \textbf{Module de \textit{matching}} : consomme les \texttt{OrderCommand}, maintient le carnet d'ordres et applique le \textit{price-time priority}. Le carnet est représenté par deux \texttt{TreeMap<Double, Deque<Order>>} (un par côté), structure standard du JDK offrant une recherche en $O(\log n)$ mais dont le coût en allocations et en \textit{pointer chasing} constituera la référence à améliorer dans les jalons suivants. L'accès concurrent au carnet est protégé par un verrou (\texttt{synchronized} ou \texttt{ReentrantLock}) — un choix délibérément coûteux, qui sera supprimé au profit du modèle \textit{Single-Writer} du Disruptor (Jalon 1).
+    \item \textbf{Module de sortie et de persistance} : reçoit les \texttt{Trade} produits par le module de \textit{matching}, les affiche sur la sortie standard et les journalise de manière synchrone dans un fichier CSV.
 \end{itemize}
 
-\subsubsection{Analyse comparative des performances Jalon 0 contre Jalon 1}
-
-L'implémentation du séquenceur devrait transformer radicalement le profil de latence de notre moteur.
-
-\begin{itemize}
-    \item Réduction de la queue de latence: En supprimant les ReentrantLock, nous devrions éliminer les "pics" de plusieurs millisecondes. La distribution de latence devient beaucoup plus étroite (plus déterministe).
-    \item Débit (Throughput): Sans la surcharge liée à la gestion des verrous et à la création d'objets, le moteur est capable de traiter un volume d'ordres par seconde nettement supérieur.
-    \item Observation du "Back-pressure": Nous introduisons ici un mécanisme de contrôle : si le moteur de matching est trop lent, le RingBuffer se remplit. Le producteur doit alors attendre que de la place se libère. Cette "pression inverse" est essentielle pour éviter l'effondrement du système sous une charge extrême (flash crash).
-\end{itemize}
-
-Le passage au RingBuffer marque la fin de l'arbitrage logiciel. Cependant, un nouveau problème surgit : deux threads lisant et écrivant sur des séquences proches en mémoire peuvent se ralentir mutuellement au niveau du silicium. C'est ce que nous traiterons dans le Jalon 2 avec le False Sharing.
-
-\subsection{Jalon 2: Le Flyweight Pattern: Vers une empreinte mémoire constante}
-
-Dans les jalons précédents, chaque message entraînait encore la manipulation d'objets Java, même si ceux-ci étaient pré-alloués dans le RingBuffer. Le Flyweight Pattern (poids-mouche) pousse la logique du "Zero-Allocation" à son paroxysme.
-
-\begin{itemize}
-    \item Le décodeur unique: Au lieu de copier les données du buffer réseau vers un objet Order, nous créons un objet "Vue" unique. Cet objet ne contient pas de données, mais uniquement des méthodes d'accès (getters/setters) pointant vers un décalage (offset) dans un bloc de mémoire brute (DirectBuffer).
-    \item Suppression de l'indirection: En éliminant les références d'objets intermédiaires, nous supprimons ce que les experts appellent le "Pointer Chasing". Le CPU n'a plus besoin de suivre plusieurs adresses mémoire pour trouver une valeur ; il lit directement la donnée là où elle a été déposée par la carte réseau.
-    \item Impact sur le GC: Puisqu'aucun nouvel objet n'est manipulé lors du matching, la JVM ne détecte aucun changement d'état sur le tas (Heap). Le risque de déclenchement d'un cycle de nettoyage devient quasi nul en régime de croisière.
-\end{itemize}
-
-\subsubsection{Élimination du False Sharing par le Padding}
-
-Le processeur manipule la mémoire par blocs de 64 octets (Cache Lines). Un problème physique survient lorsque deux variables indépendantes, utilisées par deux cœurs différents, se retrouvent par mégarde sur la même ligne de cache.
-
-\begin{itemize}
-    \item Le conflit de cohérence (MESI) : Si le thread de réception met à jour le curseur tail et que le thread de matching lit le curseur head, et que ces deux variables sont côte à côte en mémoire, le CPU considère qu'il y a un conflit. Chaque écriture sur l'un force l'invalidation du cache de l'autre cœur, créant une latence artificielle massive.
-    \item La technique du Padding : Pour isoler nos variables critiques, nous insérons des champs "morts" (des types long inutilisés) avant et après nos curseurs. L'objectif est de "remplir" la ligne de cache pour que chaque "véritable" variable occupe seule ses 64 octets.
-    \item Vérification avec JOL (Java Object Layout) : Nous utilisons l'outil d'introspection d'OpenJDK pour vérifier l'alignement réel en mémoire. Nous apportons ainsi la preuve que nos structures sont physiquement isolées, garantissant que les cœurs CPU travaillent en parallèle sans se polluer mutuellement.
-\end{itemize}
-
-\subsubsection{Analyse de l'efficacité du pipeline d'instructions}
-
-L'application combinée du Flyweight et du Padding devrait transformer l'application en un moteur déterministe.
-
-\begin{itemize}
-    \item Stabilité du P99.99: En supprimant le False Sharing, nous devrions observer une disparition des "micro-pics" de latence qui persistaient en Jalon 1. La variance du temps de réponse s'approche de celle d'un système temps réel dédié.
-    \item Maximisation de l'IPC (Instructions Per Cycle): Grâce à la réduction des conflits de cache, le processeur peut exécuter plus d'instructions par cycle d'horloge. Le "coût" du passage d'un ordre dans le système devrait descendre sous la barre des quelques centaines de cycles CPU.
-\end{itemize}
-
-À ce stade, nous avons optimisé la machine locale au maximum des capacités de la JVM. Cependant, un moteur de trading isolé ne peut fonctionner seul. Le défi suivant consiste à sortir de la mémoire partagée pour affronter la latence du réseau, ce qui nous amène au Chapitre 2 avec l'implémentation d'Aeron.
+\textit{Source: How Does a Matching Engine Work - Juan D Bustamante - Devnexus 2022 - Youtube}

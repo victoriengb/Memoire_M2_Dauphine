@@ -1,6 +1,6 @@
 \subsection{L’OS et le Réseau : Les obstacles à la distribution}
 
-Au-delà de l'optimisation algorithmique, l'obtention d'une latence faible et déterministe se heurte à un obstacle externe : l'imprévisibilité du système d'exploitation (OS). En effet, l'ordonnanceur peut suspendre arbitrairement les \textit{threads} critiques du \textit{matching engine} au profit de tâches système. Ces changements de contexte (\textit{context switches}) imposent un cycle coûteux : la mise en pause de l'unité d'exécution, l'éviction des données courantes du cache au profit de celles du nouveau processus, puis, lors de la reprise, le rechargement nécessaire des caches CPU. Ce mécanisme de "va-et-vient" détruit la localité des données et accroît considérablement la gigue (\textit{jitter}) du programme.
+Au-delà de l'optimisation algorithmique, l'obtention d'une latence faible et déterministe se heurte à un obstacle externe : l'imprévisibilité du système d'exploitation. En effet, l'ordonnanceur peut suspendre arbitrairement les \textit{threads} critiques du \textit{matching engine} au profit de tâches système. Ces changements de contexte (\textit{context switches}) imposent un cycle coûteux : la mise en pause de l'unité d'exécution, l'éviction des données courantes du cache au profit de celles du nouveau processus, puis, lors de la reprise, le rechargement nécessaire des caches CPU. Ce mécanisme de "va-et-vient" détruit la localité des données et accroît considérablement la gigue (\textit{jitter}) du programme.
 
 Parallèlement au logiciel, le matériel intervient via les requêtes d'interruption (\textit{Interrupt ReQuests} ou \textit{IRQs}). Ces signaux forcent le processeur à suspendre instantanément le flux applicatif pour traiter des événements asynchrones, tels que l'arrivée de paquets réseau ou des accès disque, générant des pics de latence imprévisibles. La recherche d'une performance de l'ordre de la nanoseconde exige donc une stratégie d'isolation totale, visant à soustraire le moteur de trading à l'influence de l'ordonnanceur et des bruits système.
 
@@ -26,26 +26,26 @@ Une fois les ressources réservées, l'exécution du programme Java est réalis�
 taskset -c 1-8 java -XX:+UseNUMA -cp . MonMatchingEngine
 \end{lstlisting}
 
-L'option \texttt{-XX:+UseNUMA} complète ce dispositif en optimisant l'allocation mémoire selon la topologie physique du serveur, minimisant ainsi les cycles d'attente lors des accès à la mémoire vive (RAM).
+L'option \texttt{-XX:+UseNUMA} complète ce dispositif en optimisant l'allocation mémoire selon la topologie physique de la machine, minimisant ainsi les cycles d'attente lors des accès à la mémoire vive (RAM).
 
 \subsubsection{Du Kernel Stack au Kernel Bypass: Vers le Zero-Copy réseau}
 
 \paragraph{Les limites de la pile réseau standard}
 
-Dans les systèmes de trading à haute fréquence, la traversée de la pile réseau représente la partie prépondérante de la latence de bout en bout, dépassant souvent le temps d'exécution de la logique métier. Comme l'illustre le tableau \ref{tab:serialization_latencies}, le temps de présence sur le lien (\textit{serialization delay}) pour un paquet standard (MTU 1500B) passe de 120 000 ns en 100Base-T à seulement 1 200 ns en 10Gbps. À ce niveau de performance, le coût logiciel devient prohibitif : la pile réseau standard du noyau Linux impose une latence de traversée de l'ordre de plusieurs microsecondes. Dès lors, pour un message de 256 octets, le temps passé par le CPU à copier les données entre les domaines mémoire (du \textit{Ring Buffer} de la NIC vers le \textit{Kernel Buffer}, puis vers le \textit{User Space}) excède mathématiquement le temps de traitement d'un ordre de bourse, souvent inférieur à 500 ns. 
+Dans les systèmes de trading à haute fréquence, la traversée de la pile réseau représente la partie prépondérante de la latence de bout en bout, dépassant souvent le temps d'exécution de la logique métier. Comme l'illustre le tableau \ref{tab:serialization_latencies}, le délai de transmission pour un paquet standard passe de 120 000 ns en 100Base-T à seulement 1 200 ns en 10GBase-T. À ce niveau de performance, le coût logiciel devient prohibitif : la pile réseau standard du noyau Linux impose une latence de traversée de l'ordre de plusieurs microsecondes. Dès lors, pour un message de 256 octets, le temps passé par le CPU à copier les données entre les domaines mémoire (du \textit{Ring Buffer} de la NIC vers le \textit{Kernel Buffer}, puis vers le \textit{User Space}) excède mathématiquement le temps de traitement d'un ordre de bourse, souvent inférieur à 500 ns. 
 
 \begin{table}[h!]
 \centering
 \begin{tabular}{@{}lrr@{}}
 \toprule
-\textbf{Bande Passante} & \textbf{Débit} & \textbf{Temps de présence sur le lien (ns)} \\ \midrule
+\textbf{Bande Passante} & \textbf{Débit} & \textbf{Durée de transmission par paquet (ns)} \\ \midrule
 100Base-T & 100 Mbps & 120 000 ns \\
 1000Base-T (1G) & 1 Gbps & 12 000 ns \\
 10GBase-T & 10 Gbps & 1 200 ns \\
 100GBase-T & 100 Gbps & 120 ns \\
 400GBase-T & 400 Gbps & 30 ns \\ \bottomrule
 \end{tabular}
-\caption{Temps de sérialisation par paquet (MTU 1500B) vs Budget CPU - Source Low Latency High-speed Systems - The Kernel Bypass Approach Ijaz Ahmad}
+\caption{Durée de transmission par paquet selon la bande passante et le débit - Source Low Latency High-speed Systems - The Kernel Bypass Approach Ijaz Ahmad}
 \label{tab:serialization_latencies}
 \end{table}
 
@@ -74,7 +74,7 @@ Le transit d'un paquet du fil vers l'application subit une cascade d'indirection
 Le \textit{Kernel Bypass} (via DPDK ou des piles propriétaires comme Solarflare Onload) court-circuite intégralement la couche logicielle de l'OS. La carte réseau écrit les données directement dans une zone mémoire partagée, accessible par l'application en mode utilisateur. L'impact de cette approche est triple :
 
 \begin{itemize}
-    \item Le thread dédié au réseau est épinglé (\textit{pinned}) sur un cœur CPU isolé et scrute en permanence les descripteurs de réception de la NIC. On élimine ainsi 100\% des interruptions et des changements de contexte.
+    \item Le thread dédié au réseau est épinglé sur un cœur CPU isolé et scrute en permanence les descripteurs de réception de la NIC. On élimine ainsi 100\% des interruptions et des changements de contexte.
     
     \item L'application gère elle-même les couches de transport (ex: pile TCP/UDP en espace utilisateur), ce qui permet de pré-allouer des buffers et d'éviter toute allocation dynamique sur le chemin critique.
     
@@ -88,15 +88,8 @@ Le passage d'un protocole textuel (FIX, JSON) ou binaire à structure variable (
 
 \begin{itemize}
     \item \textbf{Élimination du coût de parsing et de l'allocation :} 
-    La transformation de flux ASCII en objets Java (ex: \texttt{String} ou \texttt{Double}) est une hérésie en basse latence. Elle déclenche des allocations sur le \textit{heap}, augmentant la pression sur le \textit{Garbage Collector} et générant des pauses \textit{Stop-The-World}. SBE adopte une approche \textit{Allocation-Free} : les données sont lues directement depuis des \textit{DirectBuffers} (souvent mappés via \textit{Agrona}), sans instanciation d'objets intermédiaires. 
+    La transformation de flux ASCII en objets Java (ex: \texttt{String} ou \texttt{Double}) est une hérésie en basse latence. Elle déclenche des allocations sur le \textit{heap}, augmentant la pression sur le \textit{Garbage Collector} et générant des pauses \textit{Stop-The-World}. SBE adopte une approche \textit{Allocation-Free} : les données sont lues directement depuis des \textit{DirectBuffers} (souvent mappés via \textit{Agrona} que nous présenterons ultérieuerement), sans instanciation d'objets intermédiaires. 
     
-    \item \textbf{Philosophie Copy-Free et accès séquentiel :} 
+    \item \textbf{Philosophie \textit{Copy-Free} et accès séquentiel:} 
     Le design de SBE repose sur le principe de l'accès \textit{streaming}. Contrairement aux protocoles nécessitant un \textit{backtracking} ou des indirections pour accéder aux champs variables, SBE impose que les champs à longueur variable (comme les chaînes de caractères) soient placés en fin de message. Cette contrainte garantit que le processeur accède à la mémoire de manière strictement séquentielle. Cette linéarité est optimale pour le \textbf{L1 Data Prefetcher}. Le CPU anticipe le chargement des prochaines \textit{cache lines} (64 octets) dans le cache L1 avant même que le code ne les sollicite, évitant ainsi des cycles d'attente (\textit{stalls}) de pipeline.
-
-    \item \textbf{Alignement matériel et efficacité des registres :} 
-    SBE permet un alignement strict des données sur les frontières de mots machines (typiquement 8 octets). Un champ non aligné (ex: un \texttt{long} à cheval sur deux lignes de cache) force le processeur à effectuer deux accès mémoire et des opérations de masquage bitwise pour reconstruire la donnée. 
-    En utilisant l'encodage natif, SBE permet au compilateur JIT de générer des instructions d'assemblage équivalentes à un cast de structure C. Le décodage d'un champ devient alors une simple instruction \texttt{MOV} entre la mémoire et un registre CPU, s'exécutant en environ 25 ns, contre plus de 1000 ns pour des protocoles comme GPB.
-
-    \item \textbf{Déterminisme et Safepoints :}
-    La simplicité du code généré par les stubs SBE (méthodes courtes et \textit{fluent}) facilite l'inlining par le compilateur C2 de la JVM. Cela réduit la présence de \textit{Safepoint checks} au milieu du décodage, garantissant que le chemin critique du \textit{matching engine} n'est pas interrompu par une gestion interne de la machine virtuelle.
 \end{itemize}

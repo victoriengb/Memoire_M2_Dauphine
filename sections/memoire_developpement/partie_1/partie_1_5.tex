@@ -1,4 +1,4 @@
-\subsection{Analyse Comparative des Solutions Industrielles}
+\subsection{Analyse des Solutions Industrielles}
 
 \subsubsection{Agrona et la gestion de la mémoire "Off-Heap"}
 
@@ -6,7 +6,7 @@
 
 Pour pallier l'inefficience des collections de la JDK standard, nous intégrons la bibliothèque \textit{Agrona}. Les collections \texttt{java.util} souffrent de deux tares rédhibitoires pour la très basse latence : l'impossibilité de stocker des types primitifs (induisant un \textit{autoboxing} massif et une pression sur le \textit{Garbage Collector}) et la dispersion en mémoire des données entraînant un phénomène de \textit{pointer chasing}.
 
-Chaque objet Java possède un en-tête (\textit{Object Header}) de 12 à 16 octets, ajoutant une surcharge informationnelle et force le processeur à suivre des références vers des zones mémoires non contiguës. Les collections d'Agrona reposent sur des structures de données stockées dans des tableaux de primitifs contigus. Cette architecture favorise la localité spatiale : en plaçant les clés et les valeurs (dans le cadre des \textit{maps} et des \textit{sets}) de manière adjacente, Agrona maximise la probabilité qu'un couple de données réside dans une même \textit{cache line} de 64 octets. Ce design permet au \textbf{Hardware Prefetcher} du CPU d'anticiper les accès mémoire et de charger les données dans le cache L1 avant même leur sollicitation, masquant ainsi la latence de la DRAM.
+Chaque objet Java possède un en-tête (\textit{Object Header}) de 16 octets, ajoutant une surcharge informationnelle et force le processeur à suivre des références vers des zones mémoires non contiguës. Les collections d'Agrona reposent sur des structures de données stockées dans des tableaux de primitifs contigus. Cette architecture favorise la localité spatiale : en plaçant les clés et les valeurs (dans le cadre des \textit{maps} et des \textit{sets}) de manière adjacente, Agrona maximise la probabilité qu'un couple de données réside dans une même \textit{cache line} de 64 octets. Ce design permet au \textbf{Hardware Prefetcher} du CPU d'anticiper les accès mémoire et de charger les données dans le cache L1 avant même leur sollicitation, masquant ainsi la latence de la DRAM.
 
 \paragraph{Communication inter-threads et Ring Buffers :}
 
@@ -53,4 +53,4 @@ memory.freeMemory(address, 1024);
 }
 \end{lstlisting}
 
-L'usage de \texttt{compareAndSwapInt} (CAS) permet à plusieurs threads (par exemple le moteur de matching et le thread de reporting) de lire et modifier le journal d'ordres simultanément sans jamais se bloquer mutuellement. Le pipeline du processeur reste saturé d'instructions utiles, maximisant le débit d'ordres tout en garantissant que chaque transaction est immortalisée sur disque sans aucun sacrifice de vitesse.
+L'usage de \texttt{compareAndSwapInt} (CAS) permet à plusieurs threads de lire et modifier le journal d'ordres simultanément sans jamais se bloquer mutuellement. Le pipeline du processeur reste saturé d'instructions utiles, maximisant le débit d'ordres tout en garantissant que chaque transaction est enregistré sur disque sans aucun sacrifice de vitesse.
