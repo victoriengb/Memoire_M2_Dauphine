@@ -21,7 +21,21 @@
     captionpos=b,
     frame=single,
     language=bash,
-    keywordstyle=\color{blue}
+    keywordstyle=\color{blue},
+    showstringspaces=false,
+    extendedchars=true,
+    literate=
+        {é}{{\'e}}1 {è}{{\`e}}1 {ê}{{\^e}}1 {ë}{{\"e}}1
+        {à}{{\`a}}1 {â}{{\^a}}1
+        {î}{{\^i}}1 {ï}{{\"i}}1
+        {ô}{{\^o}}1 {ö}{{\"o}}1
+        {ù}{{\`u}}1 {û}{{\^u}}1 {ü}{{\"u}}1
+        {ç}{{\c{c}}}1
+        {É}{{\'E}}1 {È}{{\`E}}1 {Ê}{{\^E}}1
+        {À}{{\`A}}1 {Â}{{\^A}}1
+        {Î}{{\^I}}1 {Ô}{{\^O}}1
+        {Ù}{{\`U}}1 {Û}{{\^U}}1
+        {Ç}{{\c{C}}}1
 }
 \begin{document}
 
@@ -65,9 +79,10 @@
 \titleformat*{\section}{\LARGE\bfseries}
 
 \newpage
-%\tableofcontents UNCOMMENT
+\tableofcontents
 \newpage
-%\listoffigures UNCOMMENT \listoftables UNCOMMENT
+\listoffigures
+\listoftables
 \newpage
 
 % Thanks
@@ -100,6 +115,7 @@
 
 % Partie 2
 \input{sections/memoire_developpement/partie_2/partie_2_1.tex}
+\input{sections/memoire_developpement/partie_2/partie_2_2.tex}
 %\include{sections/contexte} ADD A NEW FILE IN sections/ % AND PUT NEXT SECTIONS
 % HERE % \include{sections/conclusion}
 

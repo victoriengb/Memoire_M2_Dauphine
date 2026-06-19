@@ -14,7 +14,7 @@ Lorsque le prix de vente le plus faible correspond au prix d'achat le plus élev
 
 Notre \textit{matching engine} est un \textit{Proof of Concept} qui simule le cœur d'une plateforme d'échange électronique. Les acteurs du système sont de deux natures : en amont, un \textbf{générateur d'ordres synthétiques} qui représente les participants de marché (\textit{market makers}, traders algorithmiques) en émettant des ordres d'achat et de vente ; en aval, un \textbf{système de persistance} qui consomme les transactions exécutées, jouant le rôle d'un système de reporting réglementaire.
 
-L'enjeu qui justifie ce mémoire est le suivant : les marchés financiers modernes exigent une réactivité que les architectures logicielles managées classiques (telles qu'une JVM standard) ne garantissent pas nativement. Chaque microseconde de latence représente un risque financier quantifiable, notamment en cas de mouvement de marché brutal. Le \textit{matching engine} doit donc assurer la fiabilité et le déterminisme des transactions sans intervention humaine, et ce, en continu (le moteur s'exécute sans interruption planifiée). Un jeu de données de test sera utilisé pour garantir la consistance des résultats entre les différentes versions du moteur. L'enjeu central de ce mémoire reste l'optimisation de la latence et du déterminisme du programme.
+L'enjeu qui justifie ce mémoire est le suivant : les marchés financiers modernes exigent une réactivité que les architectures logicielles classiques, telles qu'une JVM standard, ne garantissent pas nativement. Chaque microseconde de latence représente un risque financier quantifiable, notamment en cas de mouvement de marché brutal. Le \textit{matching engine} doit donc assurer la fiabilité et le déterminisme des transactions sans intervention humaine, et ce, en continu (le moteur s'exécute sans interruption planifiée). Un jeu de données de test sera utilisé pour garantir la consistance des résultats entre les différentes versions du moteur. L'enjeu central de ce mémoire reste l'optimisation de la latence et du déterminisme du programme.
 
 \subsubsection{Exigences fonctionnelles du \textit{matching engine}}
 
@@ -29,7 +29,7 @@ Le \textit{matching engine} permet strictement de :
     \item persister les transactions effectuées
 \end{itemize}
 
-Tout ordre qui ne trouve pas immédiatement de contrepartie n'est pas rejoué : il reste dans le carnet d'ordres (à l'état \textit{resting}) en attendant un \textit{match} futur ou une annulation. Il s'agit du comportement nominal d'un carnet d'ordres, et non d'une fonctionnalité additionnelle.
+Tout ordre qui ne trouve pas immédiatement de contrepartie n'est pas rejoué : il reste dans le carnet d'ordres (à l'état \textit{resting}) en attendant un \textit{match} futur ou une annulation. Il s'agit du comportement nominal d'un carnet d'ordres.
 
 Le \textit{matching engine} ne gère pas :
 \begin{itemize}
@@ -41,8 +41,7 @@ Le \textit{matching engine} ne gère pas :
     \item la tolérance aux pannes et la réplication
 \end{itemize}
 
-\subsubsection{Exigences non-fonctionnelles du \textit{matching engine}}
-
+\subsubsection{Exigences non-fonctionnelles du \textit{matching engine}}\label{exigences-nf}
 Les exigences suivantes constituent la \textbf{cible visée pour la version finale optimisée} du moteur. La \textit{baseline} (Jalon 0), dépourvue de toute optimisation, est attendue de dépasser significativement ces seuils — notamment à cause des pauses \textit{Stop-The-World} du \textit{Garbage Collector} — et c'est précisément cet écart, mesuré jalon après jalon, qui constitue le fil conducteur de l'implémentation.
 
 \begin{itemize}

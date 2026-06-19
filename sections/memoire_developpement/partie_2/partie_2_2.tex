@@ -1,105 +1,81 @@
-L'efficacité d'un moteur de matching ne se mesure pas seulement à sa vitesse d'exécution interne, mais à sa capacité à ingérer des ordres provenant du réseau sans distorsion de latence. Ce chapitre traite de l'affranchissement des piles réseau standards au profit de protocoles "Direct-to-Wire".
+\subsection{\textit{Continuous Benchmarking} pour le \textit{matching engine}}
 
-Références
+\subsubsection{Contexte général}
 
-\begin{itemize}
-    \item Thompson, M. (2014). Aeron: Efficient Reliable UDP Unicast and Multicast Messaging.
-\end{itemize}
+Pour le développement de notre \textit{matching engine}, nous avons adopté le principe du \textit{continuous benchmarking}, qui se distingue de l'intégration continue classique en intégrant une phase de validation des performances à chaque jalon, garantissant qu'aucune modification du code ne dégrade silencieusement les acquis des itérations précédentes. Cette exigence empêche, dans un contexte de trading haute fréquence, qu'une régression de quelques microsecondes passe inaperçue. Cela représenterait un risque financier quantifiable, et non un simple inconfort de performance. La référence sur laquelle s'appuient les comparaisons est définie manuellement, afin d'éviter qu'un commit non pertinent, un refactoring mineur ou une correction de documentation, ne vienne silencieusement déplacer cette référence et propager du bruit de mesure vers les comparaisons futures.
 
-\subsection{Jalon 3: Communication Basse Latence avec Aeron (UDP)}
+Concernant la métrique retenue, nous ciblons la latence P99.99. L'idéal aurait été d'utiliser le percentile P99.995, cohérent avec les exigences non-fonctionnelles définies en section \ref{exigences-nf} ; ce percentile n'étant pas disponible nativement au sein de JMH, nous l'intégrerons ultérieurement via les histogrammes HDR.
 
-Le passage d'une exécution locale à une architecture distribuée introduit le risque majeur de "l'indéterminisme réseau". Pour franchir cette étape, nous remplaçons les sockets TCP standards par le protocole Aeron, conçu par Martin Thompson pour répondre aux exigences de débit et de latence de l'industrie financière.
+Enfin, la politique de régression repose sur deux seuils : au-delà de 20\%, le code est rejeté, signalant une rupture structurelle incompatible avec nos objectifs ; entre 0\% et 20\%, un avertissement est émis. Ce palier assure une flexibilité opérationnelle en signalant les dérives sans bloquer les contributions dont le bénéfice global reste positif.
 
-\subsubsection{Le paradigme de l'UDP fiable et l'évitement du TCP}
+\subsubsection{Architecture du pipeline de \textit{Continuous Benchmarking}}
 
-Le protocole TCP, bien que robuste, souffre de mécanismes intrinsèquement hostiles à la basse latence, tels que l'algorithme de Nagle ou le contrôle de congestion agressif.
+Le pipeline a pour objectif de garantir qu'aucune régression de performance ne franchit la barrière de la revue de code. Il s'exécute sur GitHub Actions à partir de trois déclencheurs : un \textit{push} sur \texttt{main}, une \textit{pull request}, ou un déclenchement manuel (\textit{workflow\_dispatch}). Ce dernier mode est essentiel : il permet de rejouer le pipeline sur un commit précis, indépendamment de l'historique, afin de valider ou d'invalider manuellement une baseline candidate.
 
-\begin{itemize}
-    \item Suppression du Head-of-Line Blocking: En utilisant l'UDP comme couche de transport, Aeron évite qu'un seul paquet perdu ne bloque l'intégralité du flux de données. Aeron reconstruit une couche de fiabilité (retransmission sélective) beaucoup plus légère et prévisible.
-    \item Contrôle de flux non-bloquant : Contrairement au TCP qui force le "back-pressure" au niveau du noyau, Aeron permet de configurer des stratégies de gestion de perte de données. En HFT, il est souvent préférable de rater un message et de le rattraper via un mécanisme applicatif plutôt que de figer tout le système pendant 40ms.
-    \item Fragmentation et Réassemblage : Nous détaillerons comment Aeron découpe les messages SBE en "MTU-sized frames" de manière transparente, garantissant que le matériel réseau (switches) traite les paquets sans délai de fragmentation CPU.
-\end{itemize}
-
-\subsubsection{L'architecture "Zero-Copy" via les Log Buffers}
-
-L'innovation majeure d'Aeron réside dans son utilisation intensive de la mémoire partagée et des fichiers mappés (mmap), permettant de supprimer les copies mémoires inutiles.
+À l'échelle macro, le pipeline est structuré en trois jobs séquentiels à responsabilités disjointes, comme l'illustre la figure~\ref{fig:pipeline-continuous-benchmarking}. À l'échelle micro, chaque job délègue à un outil spécialisé :
 
 \begin{itemize}
-    \item Le Media Driver : Nous implémentons un Media Driver séparé (souvent isolé sur son propre cœur CPU). Ce composant gère l'envoi et la réception des paquets UDP, tandis que notre moteur de matching ne fait que lire dans une zone mémoire partagée appelée Log Buffer.
-    \item Publication et Souscription sans Syscalls : Lorsqu'un message est publié, il est écrit directement dans le buffer RAM. Le Media Driver l'envoie ensuite sur la carte réseau (NIC). Ce design "lock-free" permet d'échanger des messages entre la Gateway et le Matching Engine sans jamais effectuer d'appels système (syscalls) coûteux sur le chemin critique.
-    \item Conduites de données (Conduits) : Nous analyserons la structure des répertoires d'Aeron où chaque canal est un fichier physique mappé en mémoire, offrant une latence de communication inter-processus (IPC) proche des limites théoriques du bus PCIe.
+    \item \textbf{Job 1 --- \textit{Correctness gate}} (\texttt{build-and-test}) : Maven compile le projet et exécute la suite de tests unitaires via \texttt{mvn -B verify}. Les jobs de performance ne s'exécutent que si ce verrou de correction fonctionnelle est franchi.
+    \item \textbf{Job 2 --- \textit{Performance gate}} (\texttt{benchmark}) : les tests unitaires sont délibérément sautés (\texttt{-DskipTests}) pour ne pas dupliquer le travail du job précédent. JMH exécute les benchmarks et produit un fichier \texttt{jmh-result.json} au format JSON natif, publié en artefact de pipeline afin de découpler la production du résultat de son analyse.
+    \item \textbf{Job 3 --- \textit{Regression gate}} (\texttt{compare-baseline}) : le script \texttt{compare-benchmarks.sh} télécharge l'artefact et le compare à la baseline versionnée dans le dépôt (\texttt{benchmarks/baseline.json}). Le résultat est publié dans le \textbf{Job Summary} de GitHub Actions, directement visible dans l'interface du run sans permissions supplémentaires.
 \end{itemize}
 
-\subsubsection{Configuration et Tuning pour le Matching Engine}
+\begin{figure}[H]
+    \centering
+    \includesvg[width=1.1\textwidth, inkscapearea=page]{pipeline-continuous-benchmarking.svg}
+    \caption{Pipeline \textit{Continuous Benchmarking} du \textit{matching engine}}
+    \label{fig:pipeline-continuous-benchmarking}
+\end{figure}
 
-L'efficacité d'Aeron dépend de son paramétrage fin. Nous documentons ici les choix techniques effectués pour notre cluster simulé :
+\subsubsection{Choix d'implémentation du pipeline \textit{Continuous Benchmarking}}
 
-\begin{itemize}
-    \item Définition des Term Buffers : Nous dimensionnons les Term Buffers (typiquement 16MB ou 64MB) pour absorber les rafales d'ordres lors de l'ouverture des marchés sans déclencher de rotations de fichiers trop fréquentes.
-    \item Utilisation du Idle Strategy : Pour le thread de souscription (celui qui attend les ordres), nous optons pour une BusySpinIdleStrategy. Ce choix force le processeur à interroger la mémoire en continu, garantissant que le passage de la donnée du réseau vers le carnet d'ordres se fait en quelques nanosecondes, au prix d'une consommation CPU de 100%.
-    \item Monitoring via AeronStat : Nous utilisons l'outil aeron-stat pour surveiller les "Backlog" et les "NAKs" (Negative Acknowledgments). Une augmentation des NAKs est le signe d'une saturation de la pile réseau ou d'un mauvais alignement des interruptions matérielles.
-\end{itemize}
+Le script \texttt{compare-benchmarks.sh} implémente une barrière à l'intégration du code (logique de \textit{gate}) en s'appuyant sur deux utilitaires natifs du \textit{runner} Linux, sans dépendance externe. À l'échelle macro, il orchestre trois phases : extraction des percentiles, calcul du taux de régression, puis application de la politique de seuils. À l'échelle micro, chaque phase délègue à un outil adapté.
 
-L'intégration d'Aeron transforme notre réseau en un bus de données quasi-transparent. Cependant, transporter des données rapidement est inutile si le format de ces données impose un temps de décodage long. C'est ce qui justifie l'introduction du protocole SBE dans le Jalon 4.
+\textbf{Extraction des percentiles avec \texttt{jq}.} Le format de sortie natif de JMH (\texttt{-rf json}) expose les latences par percentile sous la clé \texttt{primaryMetric.scorePercentiles}, indexée par valeur numérique (ex. \texttt{``99.99''}). L'extraction repose sur une approche déclarative plutôt qu'impérative : on exprime directement \textit{quoi} chercher, le percentile clé d'un benchmark nommé, sans écrire la boucle ou les indices qui parcourraient explicitement la structure JSON. \texttt{jq} se charge seul de cette traversée et restitue directement la valeur en \texttt{ns/op}, sans variable intermédiaire de type tableau.
 
-\subsection{Jalon 4 : Sérialisation SBE et Simulation de Cluster}
+\begin{lstlisting}[language=bash, caption={Extraction déclarative d'un percentile via jq}]
+jq -r --arg bench "$benchmark_name" --arg pct "$percentile_key" '
+    .[] | select(.benchmark == $bench) | .primaryMetric.scorePercentiles[$pct]
+' "$file"
+\end{lstlisting}
 
-La performance du transport réseau (Aeron) doit impérativement être couplée à une stratégie de sérialisation à latence ultra-faible. L'utilisation de formats textuels (JSON, XML) ou même de formats binaires à schéma variable (Protobuf) introduit des étapes de parsing et d'allocation d'objets incompatibles avec la microseconde. Nous implémentons ici le Simple Binary Encoding (SBE).
+\textbf{Calcul du taux de régression avec \texttt{awk}.} Bash ne disposant pas d'arithmétique flottante native, la variation $((curr - base) / base) \times 100$ est déléguée à \texttt{awk}. Une garde sur \texttt{base == 0} évite la division par zéro lors d'un premier run à latence nulle.
 
-\subsubsection{La philosophie SBE : Le "Direct-to-Wire" sans parsing}
+\begin{lstlisting}[language=bash, caption={Calcul du taux de régression via awk}]
+    awk -v base="$baseline_value" -v curr="$current_value" '
+        BEGIN {
+            if (base == 0) { print "0"; exit }
+            printf "%.2f", ((curr - base) / base) * 100
+        }
+    '
+\end{lstlisting}
 
-Le protocole SBE, standardisé par la FIX Trading Community, repose sur une approche radicalement différente de la sérialisation classique. Au lieu de "décoder" un message, l'application "survole" les données brutes.
+\textbf{Application de la politique de seuils.} Deux indicateurs booléens pilotent l'issue du job : \texttt{is\_fail}, positif si la régression dépasse le seuil d'échec (20\%), et \texttt{is\_regression}, positif dès qu'une dérive positive est détectée. Cette séparation permet de distinguer les régressions bloquantes des dérives à surveiller sans interrompre le développement.
 
-\begin{itemize}
-    \item Accès par Offset fixe : Dans SBE, chaque champ (ex: Price, Quantity, OrderID) se trouve à une position immuable dans le message. Le compilateur SBE génère des "stubs" (décodeurs) qui calculent l'adresse mémoire exacte d'une donnée en un seul cycle CPU.
-    \item Évitement de l'Allocation : Contrairement à un parser JSON qui créerait des objets String ou Map, le décodeur SBE est un objet Flyweight (vu au Jalon 2) qui pointe directement sur le DirectBuffer d'Aeron. Aucune mémoire n'est allouée sur le tas lors de la lecture d'un ordre, éliminant toute pression sur le Garbage Collector.
-    \item Streaming Access : SBE est conçu pour une lecture séquentielle. Le processeur lit les octets dans l'ordre où ils arrivent, ce qui maximise l'efficacité du cache L1 et évite les sauts de mémoire imprévisibles.
-\end{itemize}
+\begin{lstlisting}[language=bash, caption={Flux principal de non-régression au niveau des benchmarks}]
+    local is_fail
+    is_fail=$(awk -v r="$regression_pct" -v t="$REGRESSION_FAIL_THRESHOLD_PCT" 'BEGIN { print (r > t) ? "1" : "0" }')
 
-\subsubsection{Design du Schéma et Alignement Mémoire}
+    local is_regression
+    is_regression=$(awk -v r="$regression_pct" 'BEGIN { print (r > 0) ? "1" : "0" }')
 
-La performance de SBE ne provient pas seulement de son code, mais de la structure physique du message défini dans le fichier XML de schéma.
+    if [[ "$is_fail" == "1" ]]; then
+        write_summary "**Échec : régression de ${regression_pct}% > seuil de ${REGRESSION_FAIL_THRESHOLD_PCT}%.**"
+        echo "ÉCHEC : régression de ${regression_pct}% (seuil : ${REGRESSION_FAIL_THRESHOLD_PCT}%)." >&2
+        exit 1
+    elif [[ "$is_regression" == "1" ]]; then
+        write_summary "**Avertissement : régression de ${regression_pct}%, sous le seuil d'échec mais à surveiller.**"
+        echo "AVERTISSEMENT : régression de ${regression_pct}%, sous le seuil d'échec."
+        exit 0
+    else
+        write_summary "Pas de régression détectée (variation : ${regression_pct}%)."
+        echo "OK : variation de ${regression_pct}% (amélioration ou stabilité)."
+        exit 0
+    fi
+\end{lstlisting}
 
-\begin{itemize}
-    \item Alignement sur les mots machine (64-bit) : Nous concevons notre schéma pour que les types long (8 octets) commencent toujours sur un index multiple de 8. Si un champ est mal aligné, le CPU doit effectuer deux cycles de lecture pour une seule valeur ; l'alignement garantit une lecture atomique et instantanée.
-    \item Gestion des types primitifs : Nous bannissons les types flottants (double) au profit de types entiers (long) avec un multiplicateur fixe (ex: prix stocké en "cents" ou "pips"). Cela évite les erreurs d'arrondi et permet au moteur de matching d'effectuer des comparaisons arithmétiques entières, beaucoup plus rapides au niveau matériel.
-    \item Messages à taille fixe : Bien que SBE supporte les champs de longueur variable, nous privilégions des messages de taille fixe pour nos ordres de bourse. Cela permet au moteur de matching de savoir exactement où commence le message suivant dans le RingBuffer sans calcul complexe.
-\end{itemize}
+Un cas particulier est géré explicitement : l'\textbf{absence de baseline} (\textit{bootstrap}). Lors du premier run d'un nouveau jalon, aucun fichier de référence n'existe encore dans le dépôt. Le script détecte cette situation et publie le résultat courant comme candidat à la promotion, sans déclencher d'échec. Promouvoir ce run en nouvelle baseline se résume à versionner le fichier résultat : \texttt{cp jmh-result.json benchmarks/baseline.json}. Ce mécanisme garantit que la baseline est toujours un artefact explicitement validé par le développeur, et non un résultat produit automatiquement.
 
-\subsubsection{Simulation de Cluster sous Docker-Compose}
+Cette discipline de garde explicite, intercepter une absence avant d'agir, plutôt que de laisser une erreur silencieuse se propager, n'est pas isolée au cas de la baseline : elle se retrouve à l'identique sur l'absence du fichier de résultat courant en tout début de script, et sur la division par zéro dans le calcul du taux de régression. C'est moins une décision ponctuelle qu'un idiome récurrent de programmation défensive, appliqué uniformément à chaque point d'entrée incertain du script.
 
-Pour valider l'interopérabilité entre la Gateway et le Matching Engine, nous créons un environnement de test reproductible simulant les contraintes d'un centre de données (Datacenter).
-
-\begin{itemize}
-    \item Isolation des Stacks Réseau: Via Docker-Compose, nous définissons des réseaux virtuels distincts. Chaque conteneur possède sa propre interface eth0 et sa propre pile TCP/IP-UDP. Cela nous permet de vérifier que le Media Driver d'Aeron gère correctement la résolution d'adresses et la retransmission de paquets.
-    \item Contraintes de ressources (CPU Pinning): Nous utilisons les options cpuset de Docker pour forcer le conteneur du Matching Engine sur un cœur CPU spécifique. Cela simule l'isolation de cœur (isolcpus) que nous déploierons sur le serveur de production au Chapitre 4.
-    \item Validation du flux binaire: Grâce à des outils comme Wireshark (avec le plugin SBE), nous analysons les trames circulant entre les conteneurs. Nous vérifions que l'empreinte réseau est minimale et que les messages sont effectivement compacts, sans octets de métadonnées superflus.
-\end{itemize}
-
-L'alliance d'Aeron et de SBE permet de transporter et de lire une intention de trading en un temps record, souvent inférieur à 2 microsecondes de bout en bout. La "porte d'entrée" du système est désormais optimisée. Le défi se déplace maintenant vers le Chapitre 3 : comment traiter ces messages à l'intérieur du carnet d'ordres sans perdre cet avantage de vitesse ?
-
-\subsection{Jalon 5: Analyse de la Latence de bout en bout (End-to-End) et Déterminisme}
-
-L'intégration d'Aeron et de SBE permet de mesurer pour la première fois la performance systémique réelle. Ce jalon ne se contente pas de valider la vitesse brute ; il analyse la distribution statistique du temps de trajet d'un ordre, de son émission par la Gateway à sa réception par la logique de matching, en passant par la pile réseau virtualisée.
-
-\subsubsection{Mesurer l'invisible : La capture du "Wire-to-Matching"}
-
-Pour quantifier l'apport des protocoles basse latence, nous mettons en place une instrumentation non intrusive.
-
-\begin{itemize}
-    \item Horodatage Nanoseconde (Epoch) : Chaque message SBE inclut un champ sendingTime capturé au moment précis où il est écrit dans le buffer d'Aeron sur la Gateway. À la réception, le moteur de matching capture le arrivalTime. La différence nous donne la latence de transit, incluant la sérialisation, le transport UDP et le passage par le Media Driver.
-    \item Élimination du "Coordinated Omission" : En suivant les principes de Gil Tene, nous nous assurons que notre système de mesure ne s'arrête pas pendant les pauses système. Si la Gateway est bloquée, le temps d'attente est comptabilisé dans la latence du message suivant, révélant ainsi la véritable expérience de l'utilisateur final.
-    \item Impact du "Zero-Copy" : Nous documentons la réduction drastique du temps passé dans le noyau Linux. Contrairement au Jalon 0 où chaque message déclenchait un appel système read(), Aeron permet ici au moteur de matching de "poller" la mémoire partagée, réduisant la latence de transit de 70\% par rapport à une implémentation socket standard.
-\end{itemize}
-
-\subsubsection{Analyse de la gigue (Jitter) et des percentiles extrêmes}
-
-Le succès de ce jalon se mesure à l'étroitesse de la courbe de distribution. Un système HFT n'est pas jugé sur sa moyenne, mais sur la prévisibilité de son pire cas (P99.99).
-
-\begin{itemize}
-    \item Analyse de la "Queue" (Tail Latency): Grâce à HdrHistogram, nous visualisons les "outliers". Nous isolons les causes de gigue restantes : interruptions logicielles du noyau Docker, partages de ressources CPU entre conteneurs, et rares évictions de cache.
-    \item Stabilité sous charge: Nous soumettons le cluster à un test de "Burst" (rafale). Nous démontrons que grâce au Ring Buffer d'Aeron et à la sérialisation SBE, la latence reste stable même lorsque le débit passe de 1 000 à 100 000 messages par seconde. Le système ne subit pas de dégradation exponentielle, typique des architectures basées sur les verrous.
-    \item Corrélation avec le JIT: Nous observons l'effet du "Warm-up". Les 10 000 premiers messages montrent une latence erratique (compilation C1/C2), puis la courbe s'aplatit brusquement, signalant que le code machine est optimisé et "chaud".
-\end{itemize}
-
-L'utilisation combinée d'Aeron (transport) et SBE (format) devrait garantir que l'information arrive au cœur du moteur de matching en moins de 5 microsecondes dans notre environnement simulé. Cependant, cette vitesse d'ingestion met en lumière un nouveau goulot d'étranglement : la structure interne du carnet d'ordres. Si le traitement logique (matching) prend plus de temps que la réception réseau, le Ring Buffer finira par saturer. C'est cette problématique de "vitesse de calcul interne" que nous aborderons en réinventant le stockage des ordres via le Data-Oriented Design.
+\textbf{Alternatives écartées.} Trois choix d'implémentation ont été écartés, chacun au prix d'une renonciation explicite. L'action communautaire github \texttt{benchmark-action/github-action-benchmark} effectue une comparaison automatique avec le \textit{run} précédent et propose nativement un tableau de bord historique ainsi que des commentaires automatiques sur les \textit{pull requests} ; elle a néanmoins été écartée car ce modèle de comparaison est incompatible avec notre logique de baseline manuelle, où seuls les jalons explicitement validés servent de référence --- la renonciation se paie donc en visualisation automatique de l'historique, que nous reconstituerons manuellement si besoin pour la soutenance. Python a également été écarté au profit des utilitaires natifs du \textit{runner} Linux (\texttt{jq}, \texttt{awk}), pour conserver un script auto-contenu sans gestion de dépendances ; ce choix se paie en lisibilité, l'absence d'arithmétique flottante native en bash forçant à fragmenter le calcul de régression entre deux outils plutôt que de le centraliser dans un seul langage. Enfin, la publication du résultat a été orientée vers le \textbf{Job Summary} plutôt que vers un commentaire automatique sur la \textit{pull request} : cette dernière option aurait offert une visibilité plus immédiate dans le flux de revue, mais elle nécessite des permissions d'écriture étendues sur le \textit{token} GitHub, qui échouent silencieusement sur les \textit{pull requests} issues d'un \textit{fork}, un risque jugé plus coûteux que le léger surcroît de clics pour consulter le Job Summary.
