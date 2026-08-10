@@ -1,82 +1,473 @@
-L'optimisation du transport réseau réalisée au chapitre précédent a déplacé le goulot d'étranglement vers la logique interne du carnet d'ordres (Limit Order Book). Ce chapitre détaille la transition d'une modélisation orientée objet vers une architecture orientée données (Data-Oriented Design), visant une localité de cache absolue.
+\subsection{Jalon 0 - L'Order Matching Engine en Programmation Orientée Objets classique et ses inconvénients}
 
-Références
+\subsubsection{Analyse de l'OrderBook et de sa structure avec Java Object Layout}
 
-\begin{itemize}
-    \item Documentation officielle de Java NIO (New I/O)
-    \item Documentation sun.misc.Unsafe
-\end{itemize}
+L'outil \textit{Java Object Layout} (JOL) permet d'inspecter la disposition mémoire réelle d'un objet Java, telle que la JVM la matérialise, plutôt que de la déduire de la seule déclaration des champs. La figure~\ref{fig:jol-order} présente cette disposition pour \texttt{Order}, l'unité de base répétée à chaque niveau de prix du carnet.
 
-\subsection{Jalon 5: Limit Order Book en Data-Oriented Design (DOD)}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{JOL_OrderBook.png}
+    \caption{Disposition mémoire de \texttt{Order} obtenue avec Java Object Layout}
+    \label{fig:jol-order}
+\end{figure}
 
-Le carnet d'ordres (Limit Order Book) constitue le cœur réactif du système. Dans les jalons précédents, malgré l'usage du RingBuffer, la structure interne du carnet restait dépendante d'une approche orientée objet (AoS - Array of Structures). Ce jalon marque une rupture fondamentale : nous déconstruisons l'objet Order pour adopter une architecture orientée données (Data-Oriented Design), alignée sur la hiérarchie des caches du CPU.
-
-\subsubsection{La fin de l'indirection : Du modèle AoS au modèle SoA}
-
-En Java standard, un carnet d'ordres est souvent une collection d'objets. Chaque objet Order possède sa propre adresse mémoire, forçant le CPU à "chasser des pointeurs" (Pointer Chasing) pour accéder aux données.
+Trois éléments ressortent de cette analyse:
 
 \begin{itemize}
-    \item Le problème de la fragmentation : Dans un modèle AoS, pour comparer les prix de dix ordres, le CPU doit charger dix segments de mémoire différents. Si ces segments ne sont pas contigus, le processeur subit des Cache Misses systématiques, tombant de la vitesse du cache L1 (1 ns) à celle de la DRAM (100 ns).
-    \item La solution SoA (Structure of Arrays) : Nous réorganisons la mémoire en regroupant les données par type. Tous les prix sont stockés dans un tableau primitif long[] prices, et toutes les quantités dans un long[] quantities.
-    \item Exploitation du Hardware Prefetcher : En rangeant les prix de manière contiguë, nous permettons au processeur de détecter un accès séquentiel. Le Prefetcher anticipe alors la lecture des prix suivants avant même que l'instruction ne soit exécutée, garantissant que la donnée est déjà présente dans le cache L1 au moment du matching.
+    \item L'en-tête d'objet (\textit{object header}) occupe 12 des 56 octets de l'instance. Aussi, l'alignement mémoire de la JVM introduit une perte supplémentaire de 4 octets en fin d'instance, du fait de l'\textit{object alignment} suivant. Ensemble, ces deux postes représentent 16 octets sur 56, soit 29\% de la taille de l'instance : un coût fixe payé par chaque \texttt{Order}, indépendant du nombre de champs métier, et qui pèsera d'autant plus lourd que le carnet contiendra un grand nombre d'ordres simultanément résidents.
+    \item Un autre élément, moins visible mais tout aussi structurant : l'ordre des champs dans le \textit{layout} ne correspond pas à l'ordre de déclaration dans la classe. \texttt{originalQuantity} (offset 12, \texttt{int}) précède \texttt{orderId} (offset 16, \texttt{long}) et \texttt{price} (offset 24, \texttt{double}), alors que \texttt{orderId} est déclaré avant \texttt{originalQuantity} dans le code source. La JVM HotSpot réordonne les champs pour minimiser le \textit{padding} interne, en regroupant les champs de 8 octets (\texttt{long}, \texttt{double}), puis ceux de 4 octets (\texttt{int}), puis les références (4 octets en \textit{compressed oops}) — un comportement documenté, mais qui échappe entièrement au contrôle du développeur. Conséquence directe : le \textit{layout} mémoire d'un objet Java standard n'est pas pilotable depuis le code source, ce qui rend toute optimisation de densité mémoire impossible sans sortir du modèle objet, par exemple via des tableaux de primitifs.
+    \item Enfin, les champs \texttt{side} (offset 44) et \texttt{status} (offset 48) n'occupent chacun que 4 octets, mais ces octets ne contiennent pas la valeur de l'énumération — ils contiennent une référence vers un objet \texttt{enum} alloué ailleurs dans le tas. Lire le \texttt{Side} d'un \texttt{Order} suppose donc de charger l'objet \texttt{Order}, puis de suivre cette référence jusqu'à l'objet \texttt{Side} correspondant : une forme de \textit{pointer chasing} en miniature, potentiellement coûteuse en défauts de cache lorsqu'elle est répétée à chaque ordre du carnet lors d'un parcours.
 \end{itemize}
 
-\subsubsection{Densité et Vitesse : le Bit-Packing}
+Ces observations forment, ensemble, la justification empirique de la transition vers le \textit{Data-Oriented Design} envisagée aux jalons suivants : 56 octets par \texttt{Order}, dont 16 octets d'\textit{overhead} non métier (29\%) ; un \textit{layout} mémoire non contrôlable, réordonné par la JVM selon ses propres règles d'alignement ; et une indirection supplémentaire introduite par chaque champ \texttt{enum}. Un modèle \textit{Structure-of-Arrays}, où \texttt{side} deviendrait par exemple un simple \texttt{byte} stocké dans un tableau contigu, ferait disparaître à la fois l'\textit{overhead} d'en-tête par élément et le \textit{pointer chasing} des énumérations.
 
-Pour maximiser l'efficacité de chaque ligne de cache (64 octets), nous cherchons à stocker le plus d'informations possible dans le moins d'espace possible. Nous utilisons pour cela le Bit-Packing.
+La baseline du Jalon 0 repose sur une structure volontairement non optimisée du JDK : un carnet d'ordres par côté, indexé à la fois par prix et par identifiant. Ce choix de structure duale illustre un compromis classique entre deux besoins d'accès orthogonaux, et sert de point de comparaison pour les optimisations des jalons suivants.
+
+\textbf{Structure duale : niveaux de prix triés et index par identifiant.} Chaque côté du carnet est représenté par un \texttt{TreeMap<Double, Deque<Order>>}, qui maintient les niveaux de prix triés et, à l'intérieur de chaque niveau, une file FIFO matérialisant la priorité temporelle (\textit{price-time priority}). Un \texttt{HashMap<Long, Order>} auxiliaire est nécessaire en complément : un \texttt{TreeMap} trié par prix ne permet pas de retrouver un ordre par son identifiant en temps logarithmique, or l'annulation d'un ordre (\texttt{CANCEL}) doit pouvoir le localiser sans parcourir tous les niveaux de prix.
+
+\begin{lstlisting}[language=Java, caption={Structure duale de l'OrderBook : niveaux de prix et index par identifiant}]
+public class OrderBook {
+
+    private final TreeMap<Double, Deque<Order>> buyLevels =
+            new TreeMap<>(Comparator.reverseOrder());
+    private final TreeMap<Double, Deque<Order>> sellLevels =
+            new TreeMap<>();
+
+    private final Map<Long, Order> ordersById = new HashMap<>();
+
+    public void insert(Order order) {
+        if (Objects.isNull(order))
+            throw new IllegalArgumentException("Order cannot be null");
+        if (this.ordersById.containsKey(order.orderId()))
+            throw new IllegalArgumentException("Order already exists");
+
+        this.levelsFor(order.side())
+                .computeIfAbsent(order.price(), s -> new ArrayDeque<>())
+                .offerLast(order);
+        this.ordersById.put(order.orderId(), order);
+    }
+
+    public Order remove(long orderId) {
+        Order order = this.ordersById.get(orderId);
+        if (Objects.isNull(order))
+            return null;
+
+        this.ordersById.remove(orderId);
+        this.levelsFor(order.side()).get(order.price())
+                .removeIf((Order toRemove) -> toRemove.orderId() == orderId);
+
+        if (this.levelsFor(order.side()).get(order.price()).isEmpty())
+            this.levelsFor(order.side()).remove(order.price());
+
+        return order;
+    }
+}
+\end{lstlisting}
+
+Deux gardes protègent la cohérence de la structure duale dès l'insertion : un ordre \texttt{null} est rejeté immédiatement, et un \texttt{orderId} déjà présent dans l'index lève une exception plutôt que d'écraser silencieusement l'entrée existante — ce qui laisserait l'ordre original orphelin dans sa file de niveau de prix, visible par \texttt{bestBid()} ou \texttt{bestAsk()} mais inaccessible via \texttt{remove()}.
+
+Un point d'attention sémantique mérite d'être souligné : les deux côtés n'ont pas le même ordre naturel. Le côté \texttt{BUY} doit exposer le prix le plus élevé en tête (le meilleur acheteur), le côté \texttt{SELL} le prix le plus bas en tête (le meilleur vendeur). Un \texttt{TreeMap} trie par défaut en ordre croissant : c'est pourquoi \texttt{buyLevels} est construit avec un comparateur inversé (\texttt{Comparator.reverseOrder()}), tandis que \texttt{sellLevels} conserve l'ordre naturel.
+
+Cette asymétrie a un coût explicite sur \texttt{remove} : la localisation du niveau de prix via \texttt{ordersById} s'effectue en $O(\log n)$, mais le retrait proprement dit, via \texttt{removeIf} sur la \texttt{Deque} du niveau, s'exécute en $O(k)$, $k$ étant le nombre d'ordres présents à ce niveau de prix, puisque l'ordre à retirer n'est pas nécessairement en tête de file. Cette dégradation linéaire sur les annulations est une limitation documentée de la baseline, mesurable sous forte contention, et constitue l'un des points que les jalons d'optimisation suivants chercheront à réduire.
+
+\textbf{Accès au meilleur prix.} \texttt{bestBid()} et \texttt{bestAsk()} délèguent à une méthode privée commune, qui lit le premier niveau de prix de la structure et retourne l'ordre en tête de la file de ce niveau :
+
+\begin{lstlisting}[language=Java, caption={Lecture du meilleur prix et de l'ordre prioritaire au sein d'un niveau}]
+private Order maxOrder(Side side) {
+    if (this.levelsFor(side).isEmpty())
+        return null;
+
+    Order maxOrder = this.levelsFor(side).firstEntry().getValue().peekFirst();
+
+    if (Objects.isNull(maxOrder))
+        throw new IllegalStateException(
+            "Price level exists with no orders - internal state violated");
+
+    return maxOrder;
+}
+\end{lstlisting}
+
+L'ordre en tête de file (\texttt{peekFirst()}) est le plus ancien du niveau de prix sous l'hypothèse que \texttt{createdAt} croît avec l'ordre d'insertion, c'est-à-dire que les ordres sont soumis au moteur dans l'ordre chronologique de leur horodatage. Dans ce cas, \texttt{insert} qui ne pousse qu'en fin de file (\texttt{offerLast}) garantit la priorité temporelle par construction, sans qu'il soit nécessaire de parcourir le niveau à la lecture. La garde \texttt{IllegalStateException} défend un invariant interne : un niveau de prix présent dans le \texttt{TreeMap} ne devrait jamais être vide, puisque \texttt{remove} le retire dès qu'il se vide.
+
+\subsubsection{L'état d'un ordre : la classe Order}
+
+Contrairement à \texttt{OrderCommand} et \texttt{Trade}, immuables, \texttt{Order} porte un état qui évolue dans le temps : \texttt{remainingQuantity} diminue au fil des exécutions partielles, et \texttt{status} transite de \texttt{RESTING} vers \texttt{PARTIALLY\_FILLED} puis \texttt{FILLED}, ou vers \texttt{CANCELLED} sur annulation. Deux invariants métier sont protégés explicitement par exception plutôt que par assertion ou ignorance silencieuse, un choix de conception justifié par le contexte : un ordre déjà exécuté ou annulé qui serait modifié à nouveau silencieusement introduirait une incohérence comptable difficile à détecter a posteriori.
+
+\begin{lstlisting}[language=Java, caption={Transitions d'état de l'ordre : exécution et annulation}]
+public void fill(int filledQuantity) {
+    if (this.status == Status.CANCELLED)
+        throw new IllegalStateException("The order has been cancelled");
+    if (this.status == Status.FILLED)
+        throw new IllegalStateException("The order has been filled");
+    if (filledQuantity <= 0)
+        throw new IllegalArgumentException(
+            "Cannot ask for a negative or a zero quantity of an asset");
+    if (filledQuantity > this.remainingQuantity)
+        throw new IllegalArgumentException(
+            "Cannot ask for more than remaining quantity of an asset");
+
+    this.remainingQuantity -= filledQuantity;
+    this.status = this.remainingQuantity == 0 ? Status.FILLED : Status.PARTIALLY_FILLED;
+}
+
+public void cancel() {
+    if (this.status == Status.CANCELLED)
+        throw new IllegalStateException("Order already cancelled");
+    if (this.status == Status.FILLED)
+        throw new IllegalStateException("Order already filled");
+
+    this.status = Status.CANCELLED;
+}
+\end{lstlisting}
+
+\subsubsection{Le moteur de matching : la classe MatchingEngine}
+
+\textbf{Architecture générale.} \texttt{MatchingEngine} est le point d'entrée unique du moteur. Sa responsabilité est de traduire des \texttt{OrderCommand} en \texttt{Trade} en appliquant la \textit{price-time priority}, en déléguant entièrement la gestion de la structure du carnet à \texttt{OrderBook}. La méthode publique \texttt{process()} dispatche chaque commande vers le handler approprié selon son type :
+
+\begin{lstlisting}[language=Java, caption={Point d'entrée unique du moteur de matching}]
+public class MatchingEngine {
+
+    private final OrderBook orderBook = new OrderBook();
+    private final AtomicLong tradeIdGenerator = new AtomicLong(0);
+
+    public List<Trade> process(OrderCommand command) {
+        List<Trade> trade = new ArrayList<>();
+        switch (command.commandType()) {
+            case NEW    -> trade = handleNew(command);
+            case CANCEL -> trade = handleCancel(command);
+            case MODIFY -> trade = handleModify(command);
+        }
+        return trade;
+    }
+}
+\end{lstlisting}
+
+Le générateur d'identifiants de trade est un \texttt{AtomicLong}, choix qui anticipe une éventuelle montée en concurrence au Jalon 1 sans introduire de synchronisation coûteuse dans la baseline mono-thread.
+
+\textbf{Traitement d'une commande NEW.} L'ordre entrant est d'abord inséré dans le carnet — il devient résident — puis la boucle de matching est déclenchée immédiatement. Cette approche garantit que si l'ordre n'est que partiellement exécuté, sa fraction résiduelle reste dans le carnet en attente d'une contrepartie future.
+
+\begin{lstlisting}[language=Java, caption={Traitement d'une commande NEW}]
+private List<Trade> handleNew(OrderCommand command) {
+    Order incoming = new Order(
+        command.orderId(), command.side(),
+        command.price(), command.quantity(), command.createdAt());
+    this.orderBook.insert(incoming);
+    return this.match(incoming);
+}
+\end{lstlisting}
+
+\textbf{La boucle de matching.} La méthode \texttt{match()} reçoit le taker en paramètre — c'est toujours l'ordre entrant, qui ne change pas au fil de la boucle. À chaque itération, le meilleur ordre du côté opposé est récupéré dynamiquement : si le maker précédent a été épuisé et retiré du carnet, \texttt{bestCounterparty()} renvoie automatiquement le suivant. La boucle s'arrête dès que le taker est épuisé, que le carnet est vide du côté opposé, ou que les prix ne se croisent plus.
+
+\begin{lstlisting}[language=Java, caption={Boucle de matching : price-time priority}]
+private List<Trade> match(Order taker) {
+    List<Trade> trades = new ArrayList<>();
+
+    while (taker.remainingQuantity() > 0) {
+        Order maker = bestCounterparty(taker);
+
+        if (maker == null || !isCrossed(taker, maker))
+            break;
+
+        int quantity = Math.min(taker.remainingQuantity(), maker.remainingQuantity());
+
+        taker.fill(quantity);
+        maker.fill(quantity);
+
+        trades.add(buildTrade(taker, maker, quantity));
+
+        if (maker.isEmpty())
+            orderBook.remove(maker.orderId());
+
+        if (taker.isEmpty())
+            orderBook.remove(taker.orderId());
+    }
+
+    return trades;
+}
+\end{lstlisting}
+
+Le fait de récupérer \texttt{bestCounterparty(taker)} en tête de chaque itération plutôt qu'une seule fois avant la boucle suffit à gérer la progression : si le maker a été retiré du carnet à la fin de l'itération précédente, l'appel suivant retourne naturellement le prochain meilleur ordre disponible. Le taker, lui, reste inchangé tant qu'il a de la quantité résiduelle.
+
+\textbf{Méthodes auxiliaires.} La boucle délègue trois responsabilités à des méthodes privées distinctes :
+
+\begin{lstlisting}[language=Java, caption={Méthodes auxiliaires du matching}]
+private boolean isCrossed(Order taker, Order maker) {
+    return taker.side() == Side.BUY
+            ? taker.price() >= maker.price()
+            : taker.price() <= maker.price();
+}
+
+private Trade buildTrade(Order taker, Order maker, int quantity) {
+    long id = tradeIdGenerator.getAndIncrement();
+    long executionTime = Instant.now().getEpochSecond();
+    if (taker.side() == Side.BUY)
+        return new Trade(id, taker.orderId(), maker.orderId(),
+                         maker.price(), quantity, executionTime);
+    else
+        return new Trade(id, maker.orderId(), taker.orderId(),
+                         maker.price(), quantity, executionTime);
+}
+
+private Order bestCounterparty(Order order) {
+    return order.side() == Side.BUY
+            ? this.orderBook.bestAsk()
+            : this.orderBook.bestBid();
+}
+\end{lstlisting}
+
+\texttt{isCrossed()} se limite à la comparaison de prix : la vérification de quantité résiduelle est portée par la condition de boucle (\texttt{taker.remainingQuantity() > 0}) et par le \texttt{null}-check sur le maker, ce qui évite toute redondance. \texttt{buildTrade()} isole la construction du \texttt{Trade} et l'attribution correcte des rôles \texttt{buyOrderId} et \texttt{sellOrderId} selon le side du taker ; le prix d'exécution est toujours celui du maker, conformément à la règle de \textit{price-time priority}. À noter : l'appel à \texttt{Instant.now()} sur le chemin critique est une limitation documentée de la baseline — il effectue un appel système à chaque trade produit, source de latence non déterministe, et sera remplacé au Jalon 1 par un timestamp injecté directement dans \texttt{OrderCommand} côté générateur. \texttt{bestCounterparty()} exprime en une ligne l'accès au meilleur ordre du côté opposé.
+
+\textbf{Traitement des commandes CANCEL et MODIFY.}
+
+\begin{lstlisting}[language=Java, caption={Handlers CANCEL et MODIFY}]
+private List<Trade> handleCancel(OrderCommand command) {
+    Order removed = this.orderBook.remove(command.orderId());
+    if (removed == null)
+        throw new IllegalArgumentException(
+            "Cannot cancel unknown order: " + command.orderId());
+    removed.cancel();
+    return new ArrayList<>();
+}
+
+private List<Trade> handleModify(OrderCommand command) {
+    Order existing = this.orderBook.remove(command.orderId());
+    if (existing == null)
+        throw new IllegalArgumentException(
+            "Cannot modify unknown order: " + command.orderId());
+    existing.cancel();
+    Order modified = new Order(
+        command.orderId(), existing.side(),
+        command.price(), existing.remainingQuantity(), command.createdAt());
+    this.orderBook.insert(modified);
+    return this.match(modified);
+}
+\end{lstlisting}
+
+\texttt{handleCancel()} retire l'ordre du carnet puis appelle \texttt{cancel()} sur l'objet, ce qui met à jour son statut vers \texttt{CANCELLED} et protège contre toute utilisation ultérieure de l'instance. Tenter d'annuler un ordre inconnu lève une \texttt{IllegalArgumentException} plutôt que de retourner silencieusement une liste vide, afin d'exposer immédiatement les incohérences d'état entre le producteur de commandes et le moteur.
+
+\texttt{handleModify()} applique un mécanisme \textit{remove-then-reinsert} : l'ordre existant est retiré et annulé, puis un nouvel ordre est créé avec le nouveau prix, en conservant la \texttt{remainingQuantity} résiduelle plutôt que la quantité originale. Ce choix a une conséquence sémantique forte : l'ordre modifié perd sa priorité temporelle, puisqu'il est réinséré en fin de file à son niveau de prix avec le \texttt{createdAt} de la commande \texttt{MODIFY}. Modifier un prix équivaut donc à annuler l'ordre et en soumettre un nouveau, ce qui peut déclencher un match immédiat si le nouveau prix croise le carnet.
+
+\subsubsection{Le pipeline producteur-consommateur}
+
+La baseline assemble trois modules sur trois threads distincts, reliés par deux \texttt{BlockingQueue} bornées. Ce modèle producteur-consommateur isole chaque responsabilité sur son propre thread tout en garantissant la propagation d'un signal d'arrêt ordonné (\textit{poison pill pattern}).
+
+\textbf{Architecture générale.} Le pipeline est le suivant :
+
+\begin{enumerate}
+    \item \texttt{OrderGenerator} génère des \texttt{OrderCommand} et les dépose dans \texttt{commandQueue}.
+    \item \texttt{MatchingWorker} consomme les commandes, les traite via \texttt{MatchingEngine}, et dépose les \texttt{Trade} produits dans \texttt{tradeQueue}.
+    \item \texttt{PersistenceWorker} consomme les trades et les journalise dans un fichier CSV.
+\end{enumerate}
+
+Chaque étage se termine proprement dès réception d'une \textit{poison pill} — une valeur sentinelle à \texttt{orderId = -1} pour les commandes, à \texttt{tradeId = -1} pour les trades — qu'il propage vers l'étage suivant avant de s'arrêter, garantissant qu'aucun thread aval ne reste bloqué indéfiniment sur un \texttt{take()}.
+
+\textbf{Génération des commandes : OrderGenerator.} \texttt{OrderGenerator} modélise un flux d'arrivées selon un processus de Poisson de taux $\lambda$ (\texttt{targetRatePerSecond}), en tirant les inter-arrivées selon une loi exponentielle par inversion de la fonction de répartition :
+
+\begin{lstlisting}[language=Java, caption={Tirage de l'inter-arrivée et boucle de génération}]
+private long nextInterArrivalMillis() {
+    double u = random.nextDouble();
+    double interArrivalSeconds = -Math.log(1 - u) / targetRatePerSecond;
+    return (long) (interArrivalSeconds * 1000);
+}
+
+@Override
+public void run() {
+    try {
+        for (int i = 0; i < commandCount; i++) {
+            outputQueue.put(randomCommand());
+            Thread.sleep(nextInterArrivalMillis());
+        }
+        outputQueue.put(SHUTDOWN_SIGNAL);
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        Logger.getLogger(OrderGenerator.class.getName())
+              .log(Level.SEVERE, "Thread interrupted unexpectedly");
+    }
+}
+\end{lstlisting}
+
+Une limitation documentée mérite d'être soulignée : \texttt{Thread.sleep()} ne résout que des délais entiers en millisecondes. Pour un taux cible de 10\,000 ordres/seconde, l'inter-arrivée moyenne théorique est de 0,1\,ms — valeur tronquée à 0\,ms par la conversion en \texttt{long} dans 99,995\,\% des cas. À ce taux, le générateur produit donc en boucle quasi continue plutôt que d'approximer un vrai processus de Poisson. Ce comportement est accepté comme limitation documentée de la baseline : une implémentation précise à haute fréquence (via \texttt{LockSupport.parkNanos()}) consommerait un cœur CPU en continu pour le seul rythme des arrivées, ce qui fausserait les mesures de charge du système sous test. Le \textit{seed} du générateur aléatoire est fixée à 42, ce qui garantit le déterminisme du jeu de commandes entre deux exécutions — condition nécessaire pour que les tests de régression soient reproductibles.
+
+\textbf{Routage et propagation du signal d'arrêt : MatchingWorker.}
+
+\begin{lstlisting}[language=Java, caption={Boucle principale de MatchingWorker}]
+@Override
+public void run() {
+    boolean shutdownPropagated = false;
+    try {
+        while (true) {
+            OrderCommand inputCommand = inputQueue.take();
+            if (inputCommand.equals(OrderGenerator.SHUTDOWN_SIGNAL)) {
+                outputQueue.put(MatchingWorker.SHUTDOWN_SIGNAL);
+                shutdownPropagated = true;
+                break;
+            }
+            for (Trade trade : engine.process(inputCommand))
+                outputQueue.put(trade);
+        }
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        Logger.getLogger(MatchingWorker.class.getName())
+              .log(Level.SEVERE, "Thread interrupted unexpectedly");
+    } finally {
+        if (!shutdownPropagated)
+            propagateShutdownBestEffort();
+    }
+}
+\end{lstlisting}
+
+Le flag \texttt{shutdownPropagated} garantit qu'un seul signal d'arrêt est déposé dans \texttt{outputQueue}, quel que soit le chemin de sortie. Sur le chemin nominal, la \textit{poison pill} est propagée avant le \texttt{break}. Sur le chemin d'interruption, le \texttt{finally} délègue à \texttt{propagateShutdownBestEffort()}, qui utilise \texttt{offer()} plutôt que \texttt{put()} : \texttt{put()} vérifierait le flag d'interruption déjà positionné et lèverait immédiatement une \texttt{InterruptedException}, laissant \texttt{PersistenceWorker} bloqué indéfiniment.
+
+\textbf{Persistance synchrone : PersistenceWorker.}
+
+\begin{lstlisting}[language=Java, caption={Boucle de persistance CSV}]
+@Override
+public void run() {
+    try {
+        csvWriter.write(CSV_HEADER);
+        Trade trade;
+        while (true) {
+            trade = inputQueue.take();
+            if (trade.equals(MatchingWorker.SHUTDOWN_SIGNAL))
+                break;
+            System.out.println(trade);
+            csvWriter.write(toCsvLine(trade));
+            csvWriter.flush();
+        }
+    } catch (IOException e) {
+        Logger.getLogger(PersistenceWorker.class.getName())
+              .log(Level.SEVERE, "Unexpected I/O error occurred while writing to file");
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        Logger.getLogger(PersistenceWorker.class.getName())
+              .log(Level.SEVERE, "Thread interrupted unexpectedly");
+    }
+}
+
+private String toCsvLine(Trade trade) {
+    return String.format(Locale.US, "%d,%d,%d,%.2f,%d,%d\n",
+            trade.tradeId(), trade.buyOrderId(), trade.sellOrderId(),
+            trade.executionPrice(), trade.quantity(), trade.executedAt());
+}
+\end{lstlisting}
+
+Chaque trade est écrit puis immédiatement "flushé" (\texttt{flush()} après chaque ligne), conformément à l'exigence de durabilité des NFR : en cas d'arrêt brutal du processus, les trades déjà traités ne sont pas perdus dans un buffer. \texttt{Locale.US} est passé explicitement à \texttt{String.format()} pour forcer le point comme séparateur décimal indépendamment de la locale système — sans quoi un environnement francophone produirait \texttt{108,63} au lieu de \texttt{108.63}, créant une colonne fantôme dans le CSV. La fermeture du \texttt{Writer} est déléguée à l'appelant via \texttt{try-with-resources} dans \texttt{Main}.
+
+\textbf{Assemblage du pipeline : Main.}
+
+\begin{lstlisting}[language=Java, caption={Assemblage et lancement du pipeline}]
+public static void main(String[] args) throws InterruptedException, IOException {
+    BlockingQueue<OrderCommand> commandQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    BlockingQueue<Trade> tradeQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+
+    MatchingEngine engine = new MatchingEngine();
+    String outputCsvPath = buildOutputCsvPath();
+
+    try (Writer csvWriter = new FileWriter(outputCsvPath)) {
+        Thread generatorThread = new Thread(
+                new OrderGenerator(commandQueue, COMMAND_COUNT, TARGET_RATE_PER_SECOND),
+                "order-generator");
+        Thread matchingThread = new Thread(
+                new MatchingWorker(commandQueue, tradeQueue, engine),
+                "matching-worker");
+        Thread persistenceThread = new Thread(
+                new PersistenceWorker(tradeQueue, csvWriter),
+                "persistence-worker");
+
+        generatorThread.start();
+        matchingThread.start();
+        persistenceThread.start();
+
+        generatorThread.join();
+        matchingThread.join();
+        persistenceThread.join();
+    }
+
+    System.out.println("Pipeline terminé. Trades journalisés dans " + outputCsvPath);
+}
+
+private static String buildOutputCsvPath() throws IOException {
+    Files.createDirectories(OUTPUT_DIR);
+    String timestamp = LocalDateTime.now().format(TIMESTAMP_FORMAT);
+    return OUTPUT_DIR.resolve("trades-" + timestamp + ".csv").toString();
+}
+\end{lstlisting}
+
+Les deux queues sont des \texttt{ArrayBlockingQueue} bornées à \texttt{QUEUE\_CAPACITY = 1024}, ce qui exerce une contre-pression naturelle sur le générateur : si le matching ne suit pas, \texttt{put()} bloque le producteur plutôt que d'accumuler des commandes en mémoire sans limite. Le fichier de sortie est nommé par horodatage (\texttt{trades-yyyyMMdd-HHmmss-SSS.csv}), ce qui évite l'écrasement entre deux exécutions successives sans nécessiter de compteur d'état global. La fermeture du \texttt{Writer} est gérée par un \texttt{try-with-resources}, garantissant qu'elle intervient après la terminaison de \texttt{persistenceThread} — aucune écriture résiduelle ne peut donc survenir sur un writer déjà fermé.
+
+\subsubsection{Mesure de la baseline : méthodologie JMH et interprétation des résultats}
+
+\textbf{Choix de l'outillage.} La mesure de la latence de la fonction principale, \texttt{engine.process}, repose sur JMH. Cet outil permet d'éviter les pièges classiques du micro-benchmarking en Java (\textit{dead-code elimination}, biais de warmup, etc.). Utiliser \texttt{System.nanoTime()} produirait des mesures optimistes sur plusieurs ordres de grandeur. Le JIT verrait que le résultat de \texttt{engine.process} n'est jamais utilisé et supprimerait simplement l'appel.
+
+\textbf{Configuration commune des trois benchmarks.} Les annotations de classe de \texttt{MatchingEngineBenchmark} fixent le protocole appliqué aux trois scénarios :
+
+\begin{lstlisting}[language=Java, caption={Configuration JMH du benchmark de la baseline}]
+@BenchmarkMode(Mode.SampleTime)
+@OutputTimeUnit(TimeUnit.NANOSECONDS)
+@Warmup(iterations = 5, time = 1, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 10, time = 1, timeUnit = TimeUnit.SECONDS)
+@Fork(1)
+public class MatchingEngineBenchmark { ... }
+\end{lstlisting}
+
+\texttt{SampleTime} est privilégié à \texttt{AverageTime} car il permet de voir les percentiles \texttt{P50}, \texttt{P90}, \texttt{P99}, \texttt{P99.9}, \texttt{P99.99}, \texttt{P99.999}, \texttt{P99.9999} et \texttt{P100} permettent d'éviter les problèmes de latence masqués par la moyenne comme vu dans l'état de l'art. Cinq itérations de \textit{warmup} d'une seconde laissent au compilateur le temps aux méthodes du \textit{hot path} (\texttt{process()}, \texttt{match()}, \texttt{bestCounterparty()}) d'être optimisées par le JIT avant les mesures. Dix itérations de mesure d'une seconde constituent les mesures de notre benchmark.
+
+L'annotation \texttt{@Fork()} permet de lancer plusieurs JVM pour mitiguer les biais de la JVM (variation des décisions JIT, ) en faisant tourner successivement les mesures dans des JVMs distinctes et en moyennant les résultats pour limiter les impacts des aléas de la JVM sur les mesures. 
+Le choix de \texttt{@Fork(1)} permet d'isoler les biais de la JVM (variation des décisions JIT, état partagé du garbage collector) mais ne les amortit pas. Cela permet cela-dit d'obtenir une vitesse d'exécution des mesures. Il est envisagé de lancer plusieurs JVM pour les mesures comparatives finales (par exemple lancer cinq JVM en parallèle).
+
+\textbf{Trois scénarios pour trois profils de latence.} 
+
+Nous avons choisi de distinguer trois scénarios distincts :
 
 \begin{itemize}
-    \item Compression sans perte: Un type long en Java occupe 64 bits. En trading, un prix et une quantité n'ont souvent pas besoin de 64 bits chacun. Nous "packons" deux entiers de 32 bits dans un seul long.
-        \subitem Exemple : long packedOrder = (price << 32) | (quantity \& 0xFFFFFFFFL);
-    \item Réduction de la bande passante mémoire: Cette technique divise par deux le volume de données transitant entre la RAM et le CPU. Puisque le processeur est capable de manipuler des registres de 64 bits de manière atomique, nous extrayons le prix ou la quantité via des masques binaires (bit-masking) en un seul cycle d'horloge.
-    \item Évitement des types flottants: Le Bit-Packing nous impose de travailler avec des entiers (Fixed-point arithmetic). Cela supprime le coût de passage par l'unité de calcul flottant (FPU) et élimine les imprécisions d'arrondi critiques en finance.
+    \item \texttt{restingOrder} : le carnet est vide et l'ordre entrant ne trouve jamais de correspondance mais est simplement enregistré. On mesure, ici, le coût d'une insertion suivi d'une tentative de match avortée. 
+    \item \texttt{fullMatch} : un \textit{maker} de quantité identitque est préparé dans le \texttt{@Setup}, le \textit{taker} est mis en correspondance avec une contrepartie exactement une fois. À la fin d'une itération, un \texttt{Trade} est produit et les deux \texttt{Order} sont retirés du carnet. 
+    \item \texttt{partialMatch} : la quantité du taker excède celle du maker. Le \textit{maker} est totalement consommé et retiré tandis que le \textit{taker} est partiellement rempli.
 \end{itemize}
 
-\subsubsection{Algorithmes "Branchless" et prédictibilité du pipeline}
+Fusionner ces trois scénarios en un seul masquerait des profils de latence différents derrière une moyenne simplificatrice. C'est précisément cette simplification trompeuse que nous souhaitons éviter. Trois \texttt{@Benchmark} distincts couvrent donc les trois chemins possibles à l'intérieur de \texttt{match()}.
 
-Le matching d'ordres repose sur des comparaisons (ex: if (bidPrice >= askPrice)). Cependant, les branchements conditionnels mal prédits par le CPU peuvent vider le pipeline d'exécution, causant une perte de 15 à 20 cycles.
+
+\textbf{Un \texttt{@Setup(Level.Invocation)} nécessaire.} 
+
+Le choix du niveau de \textit{setup} est important, ici nous avons choisi \texttt{Level.Invocation} qui réinitialise l'\texttt{engine} avant chaque mesure pour garantir que les \texttt{TreeMap} et la \texttt{HashMap} de l'\texttt{OrderBook} conservent une taille stable d'un appel à l'autre. Sans cette précaution, ces structures de données grossiraient au fil des nombreux appels JMH et augmenteraient mécaniquement la latence des opérations, faussant nos résultats. 
+
+\textbf{Neutralisation du \textit{dead code elimination}.} 
+
+Chaque benchmark publie le résultat de \texttt{process()} dans un \texttt{Blackhole} passé en
+paramètre :
+
+\begin{lstlisting}[language=Java, caption={Neutralisation du DCE via Blackhole}]
+blackhole.consume(state.engine.process(incoming));
+\end{lstlisting}
+
+Sans cette consommation explicite, le JIT penserait que la valeur de retour n'est jamais lue et pourrait supprimer toutes les opérations. \texttt{Blackhole.consume()} force le compilateur à considérer le résultat comme lu. 
+
+\textbf{Résultats bruts (JMH 1.37, OpenJDK 26.0.1, macOS ARM64).} Les distributions mesurées sur la baseline sont résumées dans la table~\ref{tab:jalon0-benchmarks} extraite du champ \texttt{scorePercentiles} de \texttt{jmh-result.json}.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|r|r|r|r|r|r|r|r|}
+        \hline
+        Scénario & Moyenne & \textbf{P50} & \textbf{P90} & \textbf{P99} & \textbf{P99.9} & \textbf{P99.99} & \textbf{P99.999} & \textbf{P100} \\
+        \hline
+        \texttt{restingOrder}  & 44.6  & 42 & 42  & 84  & 416  & 6\,138   & 146\,654  & 324\,096 \\
+        \texttt{partialMatch}  & 80.0  & 83 & 84  & 167 & 917  & 9\,642   & 443\,855  & 471\,552 \\
+        \texttt{fullMatch}     & 91.3  & 83 & 125 & 208 & 709  & 10\,076  & 134\,567  & 540\,672 \\
+        \hline
+    \end{tabular}
+    \caption{Latences par percentile du chemin critique \texttt{process()}, en ns/op. Extraites de \texttt{jmh-result.json}.}
+    \label{tab:jalon0-benchmarks}
+\end{table}
+
+\textbf{Interprétation.} Cinq observations se dégagent de ces chiffres.
 
 \begin{itemize}
-    \item Élimination des sauts conditionnels : Nous réécrivons les fonctions critiques en utilisant des opérations logiques ou des opérateurs ternaires que le compilateur JIT peut transformer en instructions CMOV (Conditional Move).
-    \item Déterminisme algorithmique : En rendant le chemin d'exécution identique, que l'ordre soit exécuté ou non, nous stabilisons le temps de traitement. Le prédicteur de branchement du CPU n'est plus "pollué" par la volatilité du marché, garantissant une latence constante même lors des pics d'activité.
-    \item Vectorisation potentielle : Cette structure de données contiguë prépare le terrain pour l'utilisation des instructions SIMD (Single Instruction, Multiple Data). Dans les versions futures (via Project Panama), nous pourrions comparer quatre prix simultanément en une seule instruction processeur.
+    \item Premièrement, la plus faible médiane d'exécution se déroule en une quarantaine de nanosecondes. \texttt{restingOrder} présente un \texttt{P50} à 42\,ns soit 168 cycles d'horloges (selon l'hypothèse de l'état de l'art d'un cycle d'horloge valant 0.25\,ns). Une opération vaut donc moins qu'un accès à la RAM en terme de coût. Il s'agit d'une performance correcte dès la baseline lié à la petite taille de nos dictionnaires. Le chemin d'exécution a donc une complexité raisonnable. Le coût sur lequel nous nous focaliserons se situera donc en queue de distribution.
+    \item Deuxièmement, la queue de distribution s'étale sur plusieurs ordres de grandeur (on passe de $10^2$ pour le P99.9 à $10^5$ pour le P99.999). Ce changement d'échelle immense ne s'explique pas par une augmentation de la complexité des opérations mais par des événements externes documentées dans l'état de l'art (pauses \textit{Stop-the-World}, changement de contexte du fait des verrous). Il dévoile un besoin d'optimisation réel des performances pour se rapprocher de nos objectifs.
+    \item Troisièmement, à partir du P99.999 on voit que le \texttt{partialMatch} devient près de quatre fois plus lent que le \texttt{fullMatch} tandis qu'il était plus performant sur tous les précédents percentiles. La cause de cette sous-performance n'est pas tranchée et mérite une investigation dédiée.
+    \item Quatrièmement, la gigue mesurée par JMH est significative. L'intervalle de confiance rapporté pour \texttt{fullMatch} est $[84.30\,;\,98.24]$\,ns/op autour d'une moyenne de 91.27\,ns/op, soit une demi-largeur d'environ ${\pm}\,7\%$. Pour \texttt{partialMatch}, l'intervalle est $[70.55\,;\,89.47]$\,ns/op autour de 80.01\,ns/op, soit environ ${\pm}\,12\%$. Ces marges importantes s'expliquent par l'imprévisibilité des pauses \textit{Stop-the-World} ainsi que celle des changements de contexte. Elles appellent à des optimisation de la gigue pour améliorer le déterminisme du programme.
+    \item Cinquièmement, les chiffres confirment notre intuition sur la nécessité de séparer les mesures en trois scénarios pour ne pas agglomérer des réalités différentes en un seul chiffre simplificateur. 
 \end{itemize}
 
-L'application du DOD et du Bit-Packing transforme le carnet d'ordres en une machine de calcul binaire pure. Le moteur de matching ne traite plus des "ordres", mais des "flux de bits" optimisés pour le silicium. Une fois cette performance de calcul atteinte, le dernier défi est de s'assurer que l'écriture des logs ne ralentit pas cette mécanique : c'est l'objet de la section sur la persistance Zero-copy.
-
-\subsection{Jalon 6 : Persistance Zero-Copy via MappedByteBuffer}
-
-Dans un système financier, la performance ne peut se faire au détriment de la résilience. Chaque exécution d'ordre doit être journalisée pour répondre aux exigences de conformité (MiFID II) et permettre une récupération après sinistre. Cependant, les appels système classiques d'écriture sur disque (write()) introduisent des pauses inacceptables. Le Jalon 6 résout ce dilemme par l'implémentation d'une persistance "native" via les fichiers mappés en mémoire.
-
-\subsubsection{Le mécanisme du Memory Mapping (mmap)}
-
-L'utilisation de java.nio.MappedByteBuffer permet de lier directement une portion de l'espace d'adressage virtuel de la JVM à un fichier physique sur le disque (SSD NVMe).
-
-\begin{itemize}
-    \item Suppression des copies entre espaces : Dans une architecture standard, une donnée est copiée du "User Space" (JVM) vers le "Kernel Space" (OS) avant d'atteindre le disque. Avec mmap, cette copie intermédiaire disparaît. Écrire un log revient à écrire dans un tableau d'octets (byte[]) en RAM.
-    \item Le rôle du Page Cache : C'est le noyau Linux qui prend la responsabilité de la persistance. Lorsqu'une page mémoire est modifiée ("dirty page"), le système d'exploitation la synchronise avec le support physique de manière asynchrone. Pour le moteur de matching, l'opération est quasi instantanée car elle s'effectue à la vitesse de la mémoire vive.
-    \item Accès Off-Heap : Ces buffers résident en dehors du tas Java (Heap). Par conséquent, même si le journal de transactions atteint plusieurs gigaoctets, il n'ajoute aucune charge de travail au Garbage Collector, car la JVM ne "scanne" pas cette zone mémoire lors de ses cycles de nettoyage.
-\end{itemize}
-
-\subsubsection{Architecture "Append-Only" et Sérialisation SBE}
-
-Pour maximiser le débit d'écriture et minimiser la fragmentation du SSD, nous adoptons une structure de journalisation purement séquentielle (Append-Only Log).
-
-\begin{itemize}
-    \item Journalisation binaire dense : Nous réutilisons le protocole SBE (étudié au Jalon 4) pour la persistance. Chaque événement (Trade, Cancel, NewOrder) est écrit sous forme d'une trame binaire de taille fixe. Cela permet non seulement de gagner de l'espace, mais aussi de garantir que le disque effectue des écritures alignées sur ses blocs physiques.
-    \item Récupération instantanée (Recovery) : En cas de crash, le redémarrage du système consiste simplement à "remapper" le fichier. Le moteur de matching peut alors relire le journal à la vitesse de la RAM pour reconstruire l'état exact du carnet d'ordres en quelques millisecondes.
-    \item Évitement du verrouillage de fichier : Nous utilisons des techniques de "Memory Barriers" pour nous assurer que l'index d'écriture est mis à jour atomiquement. Cela permet à un processus tiers (par exemple, un moteur de reporting) de lire le journal en temps réel sans jamais bloquer le moteur de matching principal.
-\end{itemize}
-
-\subsubsection{Optimisation du Flush et Durabilité}
-
-La contrepartie de la vitesse du mmap est le risque de perte de données en cas de coupure de courant si les pages ne sont pas encore "flushées" sur le disque.
-
-\begin{itemize}
-    \item Stratégies de synchronisation : Nous analysons le compromis entre msync(ASYNC) et msync(SYNC). En trading haute fréquence, on privilégie souvent la délégation au noyau (asynchrone) pour maintenir la latence, tout en s'appuyant sur une réplication réseau (Aeron) vers un second nœud pour la sécurité.
-    \item Alignement sur les Huge Pages : Pour optimiser encore l'accès, nous configurons l'OS pour utiliser des Huge Pages (2MB au lieu de 4KB). Cela réduit la taille de la table des pages du noyau et accélère la traduction d'adresses virtuelles en adresses physiques, un gain de quelques nanonsecondes crucial lors des rafales de transactions.
-\end{itemize}
-
-Nous avons démontré qu'il est possible de détourner la machine virtuelle Java de sa vocation originelle pour en faire un environnement de programmation système de haute performance. En fusionnant le Data-Oriented Design (DOD) et la persistance Zero-Copy, nous avons créé une symbiose où le code Java épouse la topologie du processeur au lieu de la subir.
-
-L'implémentation de la persistance Zero-copy clôture la phase de développement du moteur de matching. Nous avons maintenant un système capable de recevoir (Aeron), de transformer (SBE), d'exécuter (DOD) et de sauvegarder (mmap) un ordre de bourse sans jamais quitter le domaine de la microseconde. Nous allons maintenant nous attacher à prouver ces résultats par une méthodologie de benchmark scientifique.
+Cette baseline chiffrée, complétée par l'analyse mémoire de la figure~\ref{fig:jol-order}, constitue le point de référence quantitatif auquel les jalons suivants viendront se comparer. Il permet avec des mesures empiriques de confirmer les affirmations de l'état de l'art et montre le besoin d'aller au-delà des architectures à verrou et du paradigme objet pour la faible latence. Ces mesures locales constituent la référence de baseline retenue pour ce mémoire ; le pipeline CI/CD, aligné sur la même version de JDK, sert uniquement de gate de non-régression sur les jalons ultérieurs, sans prétention à reproduire l'environnement de mesure exact.

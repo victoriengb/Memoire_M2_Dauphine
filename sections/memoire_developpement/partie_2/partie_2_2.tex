@@ -27,6 +27,9 @@ Le pipeline a pour objectif de garantir qu'aucune régression de performance ne 
     \label{fig:pipeline-continuous-benchmarking}
 \end{figure}
 
+\begin{comment}
+
+
 \subsubsection{Choix d'implémentation du pipeline \textit{Continuous Benchmarking}}
 
 Le script \texttt{compare-benchmarks.sh} implémente une barrière à l'intégration du code (logique de \textit{gate}) en s'appuyant sur deux utilitaires natifs du \textit{runner} Linux, sans dépendance externe. À l'échelle macro, il orchestre trois phases : extraction des percentiles, calcul du taux de régression, puis application de la politique de seuils. À l'échelle micro, chaque phase délègue à un outil adapté.
@@ -79,3 +82,4 @@ Un cas particulier est géré explicitement : l'\textbf{absence de baseline} (\t
 Cette discipline de garde explicite, intercepter une absence avant d'agir, plutôt que de laisser une erreur silencieuse se propager, n'est pas isolée au cas de la baseline : elle se retrouve à l'identique sur l'absence du fichier de résultat courant en tout début de script, et sur la division par zéro dans le calcul du taux de régression. C'est moins une décision ponctuelle qu'un idiome récurrent de programmation défensive, appliqué uniformément à chaque point d'entrée incertain du script.
 
 \textbf{Alternatives écartées.} Trois choix d'implémentation ont été écartés, chacun au prix d'une renonciation explicite. L'action communautaire github \texttt{benchmark-action/github-action-benchmark} effectue une comparaison automatique avec le \textit{run} précédent et propose nativement un tableau de bord historique ainsi que des commentaires automatiques sur les \textit{pull requests} ; elle a néanmoins été écartée car ce modèle de comparaison est incompatible avec notre logique de baseline manuelle, où seuls les jalons explicitement validés servent de référence --- la renonciation se paie donc en visualisation automatique de l'historique, que nous reconstituerons manuellement si besoin pour la soutenance. Python a également été écarté au profit des utilitaires natifs du \textit{runner} Linux (\texttt{jq}, \texttt{awk}), pour conserver un script auto-contenu sans gestion de dépendances ; ce choix se paie en lisibilité, l'absence d'arithmétique flottante native en bash forçant à fragmenter le calcul de régression entre deux outils plutôt que de le centraliser dans un seul langage. Enfin, la publication du résultat a été orientée vers le \textbf{Job Summary} plutôt que vers un commentaire automatique sur la \textit{pull request} : cette dernière option aurait offert une visibilité plus immédiate dans le flux de revue, mais elle nécessite des permissions d'écriture étendues sur le \textit{token} GitHub, qui échouent silencieusement sur les \textit{pull requests} issues d'un \textit{fork}, un risque jugé plus coûteux que le léger surcroît de clics pour consulter le Job Summary.
+\end{comment}

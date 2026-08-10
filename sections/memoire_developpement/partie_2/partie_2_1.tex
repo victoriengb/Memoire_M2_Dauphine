@@ -2,11 +2,13 @@
 
 Un \textit{matching engine} suit la logique du \textit{price-time priority}: 
 \begin{itemize}
-    \item les ordres d'achat les plus élevés sont priorisés par rapport à ceux plus faibles
-    \item les ordres de vente les plus bas sont priorisés par rapport à ceux plus élevés
+    \item les ordres d'achat les plus élevés sont priorisés par rapport à ceux plus faibles car ils sont les plus avantageux pour le vendeur (un acheteur prêt à payer plus cher offre de meilleures conditions).
+    \item les ordres de vente les plus bas sont priorisés par rapport à ceux plus élevés car ils sont les plus avantageux pour l'acheteur (un vendeur prêt à céder moins cher offre de meilleures conditions).
+
 \end{itemize}
 
-Lorsque le prix de vente le plus faible correspond au prix d'achat le plus élevé (par comparaison d'infériorité), un \textit{match} a lieu et la transaction prend place, au prix de l'ordre déjà présent dans le carnet (l'ordre \textit{résident}). Pour deux \textit{matchs} équivalents en termes de prix, la priorité est donnée selon une condition temporelle (premier arrivé, premier servi). Un \textit{matching engine} dans l'industrie est responsable de plusieurs tâches : vérifier que les prix d'échange ne sont pas complètement décorrélés du marché, s'assurer d'appliquer l'appétence au risque de l'entreprise par rapport aux quantités et au prix global des actifs achetés, etc. Pour ce mémoire, nous nous contenterons d'appliquer le \textit{price-time priority} sur des données ingérées depuis un générateur artificiel et nous excluerons toutes les fonctionnalités annexes d'un \textit{matching engine}.
+
+Un match a lieu lorsque le prix du taker (l'ordre demandant le match) est inférieur ou égal à celui du maker pour un taker vendeur, ou supérieur ou égal à celui du maker pour un taker acheteur. La transaction a lieu au prix demandé par le maker. Pour deux \textit{matchs} équivalents en termes de prix, la priorité est donnée selon une condition temporelle (premier arrivé, premier servi). Un \textit{matching engine} dans l'industrie est responsable de plusieurs tâches : vérifier que les prix d'échange ne sont pas complètement décorrélés du marché, s'assurer d'appliquer l'appétence au risque de l'entreprise par rapport aux quantités et au prix global des actifs achetés, etc. Pour ce mémoire, nous nous contenterons d'appliquer le \textit{price-time priority} sur des données ingérées depuis un générateur artificiel et nous excluerons toutes les fonctionnalités annexes d'un \textit{matching engine}.
 
 \subsection{Conception générale du \textit{matching engine}}
 
@@ -21,7 +23,7 @@ L'enjeu qui justifie ce mémoire est le suivant : les marchés financiers modern
 Le \textit{matching engine} permet strictement de :
 
 \begin{itemize}
-    \item générer des ordres d'achat et de vente de \textit{commodities} en temps réel (avec prix et quantité)
+    \item générer des ordres d'achat et de vente de \textit{commodities} (avec prix et quantité)
     \item annuler des ordres émis
     \item actualiser le prix d'un ordre émis
     \item autoriser des \textit{matchs} partiels (par exemple, si un acteur veut vendre 10 unités et qu'un autre souhaite en acheter 5, le \textit{match} a lieu sur 5 unités, et l'ordre de vente reste actif pour les 5 unités restantes)
@@ -95,12 +97,22 @@ Les données fondamentales du \textit{matching engine}, sans optimisation, sont 
 
 \subsubsection{Architecture du matching engine}
 
-Notre objectif étant d'optimiser la latence de notre programme, nous minimisons les communications réseau et inter-processus. Nous optons pour une architecture monolithique modulaire à trois modules, communiquant via une \texttt{LinkedBlockingQueue} — une structure bloquante standard du JDK, choisie délibérément pour la baseline afin de fournir un point de comparaison avec le \textit{Ring Buffer} introduit au Jalon 1 :
+Notre objectif étant d'optimiser la latence de notre programme, nous minimisons les communications réseau et inter-processus. Nous optons pour une architecture monolithique modulaire à trois modules, communiquant via une \texttt{ArrayBlockingQueue} --- une structure bloquante à capacité fixe du JDK, choisie délibérément pour la baseline afin de fournir un point de comparaison rigoureux avec le \textit{Ring Buffer} introduit au Jalon 1 :
 
 \begin{itemize}
-    \item \textbf{Module de génération} : produit des \texttt{OrderCommand} (\texttt{NEW}, \texttt{CANCEL}, \texttt{MODIFY}) à intervalles aléatoires et les dépose dans la file partagée à destination du module de \textit{matching}.
-    \item \textbf{Module de \textit{matching}} : consomme les \texttt{OrderCommand}, maintient le carnet d'ordres et applique le \textit{price-time priority}. Le carnet est représenté par deux \texttt{TreeMap<Double, Deque<Order>>} (un par côté), structure standard du JDK offrant une recherche en $O(\log n)$ mais dont le coût en allocations et en \textit{pointer chasing} constituera la référence à améliorer dans les jalons suivants. L'accès concurrent au carnet est protégé par un verrou (\texttt{synchronized} ou \texttt{ReentrantLock}) — un choix délibérément coûteux, qui sera supprimé au profit du modèle \textit{Single-Writer} du Disruptor (Jalon 1).
+    \item \textbf{Module de génération} : produit des \texttt{OrderCommand} (\texttt{NEW}, \texttt{CANCEL}, \texttt{MODIFY}) selon un processus de Poisson et les dépose dans la file partagée à destination du module de \textit{matching}.
+    \item \textbf{Module de \textit{matching}} : consomme les \texttt{OrderCommand}, maintient le carnet d'ordres et applique le \textit{price-time priority}. Le carnet est représenté par deux \texttt{TreeMap<Double, Deque<Order>>} (un par côté), structure standard du JDK offrant une recherche en $O(\log n)$ mais dont le coût en allocations et en \textit{pointer chasing} constituera la référence à améliorer dans les jalons suivants.
     \item \textbf{Module de sortie et de persistance} : reçoit les \texttt{Trade} produits par le module de \textit{matching}, les affiche sur la sortie standard et les journalise de manière synchrone dans un fichier CSV.
 \end{itemize}
+
+\paragraph{Choix d'\texttt{ArrayBlockingQueue} plutôt que \texttt{LinkedBlockingQueue}.}
+
+Ce choix a été arbitré entre deux structures bloquantes du JDK aux propriétés distinctes. \texttt{LinkedBlockingQueue} offre une capacité illimitée par défaut et repose sur des nœuds chaînés alloués individuellement à chaque insertion, avec deux verrous séparés pour la production et la consommation. \texttt{ArrayBlockingQueue} impose à l'inverse une capacité fixe déterminée à la construction, s'appuie sur un tableau circulaire pré-alloué, et n'expose qu'un seul verrou partagé entre les deux extrémités.
+
+Cette dernière propriété, en apparence désavantageuse (producteur et consommateur se disputent réellement la même ressource de synchronisation), est en réalité ce qui rend \texttt{ArrayBlockingQueue} structurellement plus proche du \textit{Ring Buffer} du Jalon 1 : capacité bornée, tableau pré-alloué, absence d'allocation de nœud par élément inséré. En retenant \texttt{ArrayBlockingQueue} pour la baseline, la comparaison de performance entre le Jalon 0 et le Jalon 1 isole plus proprement la variable réellement mesurée --- le passage d'un verrou classique à un mécanisme \textit{lock-free} --- sans la mélanger à un changement simultané de stratégie d'allocation mémoire, qui n'est pas l'objet de cette comparaison.
+
+Un second avantage, orthogonal à la comparaison inter-jalons, tient au comportement de \textit{back-pressure}. La capacité illimitée de \texttt{LinkedBlockingQueue} masquerait un déséquilibre de débit entre producteur et consommateur : si le module de \textit{matching} traite les commandes plus lentement qu'elles ne sont générées, la file grossirait indéfiniment sans jamais ralentir le générateur, dissimulant ainsi un comportement que la baseline devrait au contraire révéler. \texttt{ArrayBlockingQueue}, par sa capacité bornée, impose un \textit{back-pressure} explicite : l'appel bloquant \texttt{put()} suspend le producteur dès que la file est pleine, rendant observable la saturation du système sous charge --- un comportement directement comparable à celui du \textit{Ring Buffer}, qui applique le même principe via son propre mécanisme de séquences.
+
+La capacité retenue pour la baseline est de 1024 éléments, une puissance de deux choisie par cohérence avec le masquage binaire employé pour l'indexation circulaire du \textit{Ring Buffer} au Jalon 1.
 
 \textit{Source: How Does a Matching Engine Work - Juan D Bustamante - Devnexus 2022 - Youtube}
