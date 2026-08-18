@@ -1,3 +1,6 @@
+**This thesis template is a fork of a projet from a kind fellow student from Paris Dauphine.**
+
+
 # Thesis template
 
 During my academic year at University Paris Dauphine PSL, I made a thesis (with LaTeX language).
